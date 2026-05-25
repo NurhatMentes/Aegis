@@ -1,0 +1,5 @@
+streamlit
+websockets
+python-dotenv
+pandas
+requests

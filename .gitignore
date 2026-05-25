@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+aegis_state.json
+aegis_settings.json
+*.csv
+.pytest_cache/
