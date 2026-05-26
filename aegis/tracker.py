@@ -45,6 +45,8 @@ class PositionTracker:
         # State machine initialization
         self.state = "INIT"  # "INIT", "RISK_ZERO", "TRAILING", "CLOSED"
         self.is_locked = False  # Idempotence/lock flag
+        self.algo_sl_id = None
+        self.last_placed_sl_px = None
         
         # Trailing variables
         self.highest_price = 0.0
@@ -213,6 +215,10 @@ class PositionTracker:
                     symbol = self.inst_id.replace("-SWAP", "")
                     pnl_pct = ((self.current_price - self.entry_price) / self.entry_price * self.lever * 100) if self.side == "long" else ((self.entry_price - self.current_price) / self.entry_price * self.lever * 100)
                     self.action_log_cb(f"⚠️ [{symbol}] Başa Baş Koruma Kalkanı Tetiklendi! Fiyat girişe sarktığı için kalan %70 emniyetli çıkışla (${self.current_price:.6f}) kapatıldı. Borsada Gerçekleşen PnL: {pnl_pct:+.2f}% | Sermaye başarıyla korundu.")
+                # Cancel the exchange stop loss before exit
+                if getattr(self, "algo_sl_id", None):
+                    asyncio.create_task(self.exchange.cancel_algo_order(self.inst_id, self.algo_sl_id))
+                    self.algo_sl_id = None
                 asyncio.create_task(self.execute_smart_exit(size_pct=1.0, price=self.current_price, label="BE_EXIT"))
                 return
 
@@ -255,6 +261,10 @@ class PositionTracker:
                     
                     # Cancel original TP/SL orders on the exchange
                     asyncio.create_task(self.exchange.cancel_algo_orders(self.inst_id))
+                    # Reset local algo sl ID
+                    self.algo_sl_id = None
+                    # Place initial Trailing Stop on the exchange
+                    asyncio.create_task(self.set_exchange_stop_loss(self.trailing_stop))
                 else:
                     # No momentum: Execute 100% exit immediately
                     logger.info(f"[{self.inst_id}] Normal momentum (VolRatio={self.volume_ratio:.2f}, OBImb={self.ob_imbalance:.2f}). "
@@ -263,6 +273,8 @@ class PositionTracker:
                         symbol = self.inst_id.replace("-SWAP", "")
                         self.action_log_cb(f"⚡ [{symbol}] Eşik 2 ${self.current_price:.6f} seviyesinde tetiklendi. Normal momentum, anında %100 kapatma emri gönderildi.")
                     asyncio.create_task(self.exchange.cancel_algo_orders(self.inst_id))
+                    # Reset local algo sl ID
+                    self.algo_sl_id = None
                     asyncio.create_task(self.execute_smart_exit(size_pct=1.0, price=self.current_price, label="TP2_EXIT"))
 
         elif self.state == "TRAILING":
@@ -273,12 +285,27 @@ class PositionTracker:
                     self.trailing_stop = self.highest_price - (self.profile["trailing_gap_atr"] * self.atr)
                     logger.debug(f"[{self.inst_id}] New High: {self.highest_price:.6f}, Trailing Stop moved to {self.trailing_stop:.6f}")
                 
+                # Check if we should update exchange stop loss
+                should_update = False
+                if not getattr(self, "last_placed_sl_px", None):
+                    should_update = True
+                else:
+                    if self.trailing_stop > self.last_placed_sl_px + (0.1 * self.atr):
+                        should_update = True
+                        
+                if should_update:
+                    asyncio.create_task(self.set_exchange_stop_loss(self.trailing_stop))
+
                 if self.current_price <= self.trailing_stop:
                     self.is_locked = True
                     logger.info(f"[{self.inst_id}] Trailing stop breached at {self.current_price:.6f} <= {self.trailing_stop:.6f}. Triggering trailing exit.")
                     if self.action_log_cb:
                         symbol = self.inst_id.replace("-SWAP", "")
                         self.action_log_cb(f"⚡ ÇIKIŞ TETİKLENDİ: [{symbol}] Takipçi Stop ${self.current_price:.6f} seviyesinde tetiklendi.")
+                    # Cancel the exchange stop loss before exit
+                    if getattr(self, "algo_sl_id", None):
+                        asyncio.create_task(self.exchange.cancel_algo_order(self.inst_id, self.algo_sl_id))
+                        self.algo_sl_id = None
                     asyncio.create_task(self.execute_smart_exit(size_pct=1.0, price=self.current_price, label="TRAILING_EXIT"))
 
             elif self.side == "short":
@@ -287,12 +314,27 @@ class PositionTracker:
                     self.trailing_stop = self.lowest_price + (self.profile["trailing_gap_atr"] * self.atr)
                     logger.debug(f"[{self.inst_id}] New Low: {self.lowest_price:.6f}, Trailing Stop moved to {self.trailing_stop:.6f}")
 
+                # Check if we should update exchange stop loss
+                should_update = False
+                if not getattr(self, "last_placed_sl_px", None):
+                    should_update = True
+                else:
+                    if self.trailing_stop < self.last_placed_sl_px - (0.1 * self.atr):
+                        should_update = True
+                        
+                if should_update:
+                    asyncio.create_task(self.set_exchange_stop_loss(self.trailing_stop))
+
                 if self.current_price >= self.trailing_stop:
                     self.is_locked = True
                     logger.info(f"[{self.inst_id}] Trailing stop breached at {self.current_price:.6f} >= {self.trailing_stop:.6f}. Triggering trailing exit.")
                     if self.action_log_cb:
                         symbol = self.inst_id.replace("-SWAP", "")
                         self.action_log_cb(f"⚡ ÇIKIŞ TETİKLENDİ: [{symbol}] Takipçi Stop ${self.current_price:.6f} seviyesinde tetiklendi.")
+                    # Cancel the exchange stop loss before exit
+                    if getattr(self, "algo_sl_id", None):
+                        asyncio.create_task(self.exchange.cancel_algo_order(self.inst_id, self.algo_sl_id))
+                        self.algo_sl_id = None
                     asyncio.create_task(self.execute_smart_exit(size_pct=1.0, price=self.current_price, label="TRAILING_EXIT"))
 
     async def execute_smart_exit(self, size_pct: float, price: float, label: str):
@@ -455,6 +497,15 @@ class PositionTracker:
             # 5. Transition FSM state based on fill
             # Subtract filled quantity from size
             self.size = max(0.0, self.size - actual_filled_sz)
+            
+            # Round remaining size to instrument lot size precision to prevent floating point residue
+            lot_sz_str = inst_info.get("lotSz", "1")
+            if "." in lot_sz_str:
+                prec = len(lot_sz_str.split(".")[1].rstrip("0"))
+                self.size = round(self.size, prec)
+            else:
+                self.size = round(self.size, 0)
+                
             logger.info(f"[{self.inst_id}] Smart Exit execution complete. Remaining position size: {self.size}")
             
             # Transition state
@@ -468,6 +519,9 @@ class PositionTracker:
                         self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış onaylandı. [{self.side.upper()} - {self.lever}x] Stop-Loss noktası komisyonlar dahil BAŞA BAŞ seviyesine kilitlendi. Durum: RISK_ZERO (Risk Sıfır!).")
                         
                     self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=price, note="30% Kısmi Kâr Alma")
+                    # Place BreakEven stop loss order on the exchange
+                    asyncio.create_task(self.set_exchange_stop_loss(self.breakeven_px))
+
             else:  # TP2_EXIT, TRAILING_EXIT, or BE_EXIT
                 self.state = "CLOSED"
                 if self.action_log_cb:
@@ -485,3 +539,46 @@ class PositionTracker:
             self.is_locked = False
             # Force trigger state write to JSON
             self.exchange.notify_state_change()
+
+    async def set_exchange_stop_loss(self, trigger_px: float):
+        """Places or updates a stop-loss algo order on the exchange for the remaining size."""
+        try:
+            # 1. Cancel existing stop loss if any
+            if getattr(self, "algo_sl_id", None):
+                logger.info(f"[{self.inst_id}] Cancelling existing exchange stop loss order {self.algo_sl_id}...")
+                await self.exchange.cancel_algo_order(self.inst_id, self.algo_sl_id)
+                self.algo_sl_id = None
+
+            # Get instrument info for precision
+            inst_info = self.exchange.get_instrument_info(self.inst_id)
+            tick_sz = float(inst_info.get("tickSz", "0.01"))
+            
+            # Format trigger price
+            rounded_trigger = round(trigger_px / tick_sz) * tick_sz
+            px_str = f"{rounded_trigger:.8f}".rstrip("0").rstrip(".")
+            sz_str = f"{self.size:.8f}".rstrip("0").rstrip(".")
+            
+            close_side = "sell" if self.side == "long" else "buy"
+            
+            logger.info(f"[{self.inst_id}] Placing new exchange Stop-Loss at {px_str} for size {sz_str}...")
+            res = await self.exchange.place_algo_order(
+                inst_id=self.inst_id,
+                side=close_side,
+                ord_type="conditional",
+                sz=sz_str,
+                pos_side=self.pos_side,
+                mgn_mode=self.mgn_mode,
+                sl_trigger_px=px_str,
+                sl_ord_px="-1"
+            )
+            
+            if res and res.get("code") == "0" and "data" in res:
+                self.algo_sl_id = res["data"][0]["algoId"]
+                self.last_placed_sl_px = trigger_px
+                logger.info(f"[{self.inst_id}] Exchange Stop-Loss placed successfully. AlgoId: {self.algo_sl_id}, Price: {self.last_placed_sl_px}")
+            else:
+                err_msg = res.get("msg", "Unknown error") if res else "No response"
+                logger.error(f"[{self.inst_id}] Failed to place exchange Stop-Loss: {err_msg}")
+        except Exception as e:
+            logger.exception(f"[{self.inst_id}] Exception in set_exchange_stop_loss: {e}")
+

@@ -198,6 +198,41 @@ class OKXExchange:
             
         return await self.request("POST", path, data=body)
 
+    async def place_algo_order(self, inst_id: str, side: str, ord_type: str, sz: str,
+                               pos_side: str = None, mgn_mode: str = "isolated",
+                               tp_trigger_px: str = None, tp_ord_px: str = "-1",
+                               sl_trigger_px: str = None, sl_ord_px: str = "-1") -> dict:
+        """Places a conditional take-profit/stop-loss algo order to OKX."""
+        path = "/api/v5/trade/order-algo"
+        body = {
+            "instId": inst_id,
+            "tdMode": mgn_mode if mgn_mode in ("isolated", "cross") else "isolated",
+            "side": side,
+            "ordType": ord_type,
+            "sz": sz,
+            "reduceOnly": True
+        }
+        if pos_side:
+            body["posSide"] = pos_side
+        if tp_trigger_px:
+            body["tpTriggerPx"] = tp_trigger_px
+            body["tpOrdPx"] = tp_ord_px
+        if sl_trigger_px:
+            body["slTriggerPx"] = sl_trigger_px
+            body["slOrdPx"] = sl_ord_px
+            
+        return await self.request("POST", path, data=body)
+
+    async def cancel_algo_order(self, inst_id: str, algo_id: str) -> dict:
+        """Cancels a specific pending algo order."""
+        path = "/api/v5/trade/cancel-algos"
+        body = [{
+            "algoId": algo_id,
+            "instId": inst_id
+        }]
+        return await self.request("POST", path, data=body)
+
+
     async def cancel_algo_orders(self, inst_id: str) -> bool:
         """Fetches and cancels all pending algo orders (conditional, oco, trigger) for the instrument."""
         logger.info(f"[{inst_id}] Initiating cancel for all pending algo orders...")
@@ -501,6 +536,13 @@ class AegisOrchestrator:
             return
             
         tracker = self.active_trackers.pop(inst_id)
+        
+        # Cancel any active stop loss order we placed on the exchange for this tracker
+        if getattr(tracker, "algo_sl_id", None):
+            logger.info(f"[{inst_id}] Cleaning up active exchange stop-loss order {tracker.algo_sl_id}...")
+            asyncio.create_task(self.exchange.cancel_algo_order(inst_id, tracker.algo_sl_id))
+            tracker.algo_sl_id = None
+
         
         # If tracker is not CLOSED (closed externally or offline), log to CSV ledger
         if tracker.state != "CLOSED":

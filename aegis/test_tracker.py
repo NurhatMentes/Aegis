@@ -43,6 +43,18 @@ class MockExchange:
         self.cancelled_orders.append({"inst_id": inst_id, "ord_type": "algo"})
         return True
 
+    async def place_algo_order(self, inst_id, side, ord_type, sz, pos_side=None, mgn_mode=None, tp_trigger_px=None, tp_ord_px=None, sl_trigger_px=None, sl_ord_px=None):
+        self.placed_orders.append({
+            "inst_id": inst_id, "side": side, "ord_type": ord_type, "sz": sz,
+            "pos_side": pos_side, "mgn_mode": mgn_mode, "tp_trigger_px": tp_trigger_px, "sl_trigger_px": sl_trigger_px
+        })
+        return {"code": "0", "msg": "Success", "data": [{"algoId": "mock_algo_sl_123"}]}
+
+    async def cancel_algo_order(self, inst_id, algo_id):
+        self.cancelled_orders.append({"inst_id": inst_id, "algo_id": algo_id})
+        return {"code": "0", "msg": "Cancelled"}
+
+
     async def get_order(self, inst_id, ord_id):
         # Return fully filled status
         return {"code": "0", "msg": "Success", "data": [{"ordId": ord_id, "state": "filled", "accFillSz": "3"}]}
@@ -153,6 +165,82 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs.get("size_pct"), 1.0)
         self.assertEqual(kwargs.get("label"), "TRAILING_EXIT")
 
+    async def test_exchange_stop_loss_placement(self):
+        # Initialize mock exchange
+        exchange = MockExchange()
+        
+        # Create a tracker for BTC-USDT-SWAP, LONG position, size 10 contracts
+        tracker = PositionTracker(
+            inst_id="BTC-USDT-SWAP",
+            side="long",
+            size=10.0,
+            entry_price=60000.0,
+            target_tp_ratio=0.40,
+            atr=100.0,
+            ct_val=0.01,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="long",
+            esik1_fraction=0.40
+        )
+        
+        # 1. Simulate the FSM transitioning to RISK_ZERO (e.g. by running execute_smart_exit with TP1)
+        await tracker.execute_smart_exit(size_pct=0.30, price=60100.0, label="TP1")
+        await asyncio.sleep(0.01)
+        
+        self.assertEqual(tracker.state, "RISK_ZERO")
+        # Check that we placed a Stop-Loss on exchange
+        self.assertIsNotNone(tracker.algo_sl_id)
+        self.assertEqual(tracker.algo_sl_id, "mock_algo_sl_123")
+        self.assertEqual(tracker.last_placed_sl_px, tracker.breakeven_px)
+        
+        # Verify MockExchange has the placed order
+        placed_algo = [o for o in exchange.placed_orders if o.get("ord_type") == "conditional"]
+        self.assertEqual(len(placed_algo), 1)
+        self.assertAlmostEqual(float(placed_algo[0]["sl_trigger_px"]), tracker.breakeven_px)
+        
+        # 2. Update price to TP2 target with strong momentum to transition to TRAILING
+        # Reset MockExchange collections
+        exchange.placed_orders = []
+        exchange.cancelled_orders = []
+        
+        # Bullish momentum: vol_ratio > 2.0 (e.g. 2.5), ob_imbalance > 0.15 (e.g. 0.30)
+        tracker.update_tick(60260.0, volume_ratio=2.5, ob_imbalance=0.30)
+        await asyncio.sleep(0.01)
+        
+        self.assertEqual(tracker.state, "TRAILING")
+        # Check that previous exchange SL was cancelled and new one placed
+        cancelled_sl = [c for c in exchange.cancelled_orders if c.get("inst_id") == "BTC-USDT-SWAP"]
+        self.assertTrue(any(c.get("ord_type") == "algo" for c in cancelled_sl))
+        
+        # Check that new trailing stop was placed
+        self.assertEqual(tracker.last_placed_sl_px, tracker.trailing_stop)
+        placed_algo = [o for o in exchange.placed_orders if o.get("ord_type") == "conditional"]
+        self.assertEqual(len(placed_algo), 1)
+        self.assertAlmostEqual(float(placed_algo[0]["sl_trigger_px"]), tracker.trailing_stop)
+        
+        # 3. Price goes higher -> trailing stop moves up by > 0.1 * ATR -> exchange stop loss is updated!
+        # Initial trailing stop: 60260 - (1.5 * 100) = 60110
+        # Price goes to 60400 -> trailing stop moves to 60250.
+        # Difference = 60250 - 60110 = 140. ATR is 100, 0.1 * ATR is 10.
+        # Since 140 >= 10, it should update!
+        exchange.placed_orders = []
+        exchange.cancelled_orders = []
+        
+        tracker.update_tick(60400.0, volume_ratio=1.0, ob_imbalance=0.0)
+        await asyncio.sleep(0.01)
+        self.assertEqual(tracker.trailing_stop, 60250.0)
+        
+        # Verify old SL cancelled and new placed
+        cancelled_sl = [c for c in exchange.cancelled_orders if c.get("algo_id") == "mock_algo_sl_123"]
+        self.assertEqual(len(cancelled_sl), 1)
+        placed_algo = [o for o in exchange.placed_orders if o.get("ord_type") == "conditional"]
+        self.assertEqual(len(placed_algo), 1)
+        self.assertAlmostEqual(float(placed_algo[0]["sl_trigger_px"]), 60250.0)
+
+
+
 
 if __name__ == "__main__":
     unittest.main()
+
