@@ -198,10 +198,9 @@ class PositionTracker:
                     self.action_log_cb(f"🎯 [{symbol}] Eşik 1 (%{int(self.esik1_fraction * 100)} Hedef) yakalandı! [{self.side.upper()} - {self.lever}x] Pozisyonun %30'u için LİMİT kapatma emri fırlatıldı.")
                 
                 # Calculate exit price with a 0.5 * ATR buffer
-                if self.side == "long":
-                    exit_price = self.current_price - (0.5 * self.atr)
-                else:
-                    exit_price = self.current_price + (0.5 * self.atr)
+                # LONG close = SELL -> place slightly BELOW market to get filled as price rises
+                # SHORT close = BUY  -> place slightly BELOW market so the tolerance buffer brings it near market
+                exit_price = self.current_price - (0.5 * self.atr)
                 
                 # Spawn asynchronous exit task
                 asyncio.create_task(self.execute_smart_exit(size_pct=0.30, price=exit_price, label="TP1"))
@@ -265,10 +264,11 @@ class PositionTracker:
                         symbol = self.inst_id.replace("-SWAP", "")
                         self.action_log_cb(f"📈 [{symbol}] Eşik 2 (Tam Hedef) yakalandı! [{self.side.upper()} - {self.lever}x] Hacim güçlü ({self.volume_ratio:.2f}x). Orijinal TP iptal edildi, Takipçi Stop ${self.trailing_stop:.6f} seviyesinden aktif edildi.")
                     
-                    # Cancel exchange Take-Profit order
-                    asyncio.create_task(self.cancel_exchange_take_profit())
-                    # Place initial Trailing Stop on the exchange (cancels BreakEven SL automatically)
-                    asyncio.create_task(self.set_exchange_stop_loss(self.trailing_stop))
+                    # Cancel the existing OCO order (TP+SL) and place trailing stop atomically.
+                    # Using a single sequential coroutine avoids the race condition where
+                    # set_exchange_stop_loss tries to cancel algo_sl_id that is still being
+                    # cancelled by cancel_exchange_take_profit.
+                    asyncio.create_task(self._transition_to_trailing_stop(self.trailing_stop))
                 else:
                     # No momentum: Execute 100% exit immediately
                     logger.info(f"[{self.inst_id}] Normal momentum (VolRatio={self.volume_ratio:.2f}, OBImb={self.ob_imbalance:.2f}). "
@@ -408,16 +408,44 @@ class PositionTracker:
                 self.is_locked = False
                 return
 
+            # --- GUARD: For TP1 partial exits, if rounded size == full position size,
+            # the position is too small to split (e.g. 0.01 BTC where 30% = 0.003 < lot_sz).
+            # In this case, skip the actual sell and just transition to RISK_ZERO + OCO order.
+            if label == "TP1" and sz >= self.size:
+                logger.warning(
+                    f"[{self.inst_id}] TP1 partial size {sz} equals full position size {self.size} "
+                    f"(position too small to split). Skipping partial sell — moving to RISK_ZERO directly."
+                )
+                self.state = "RISK_ZERO"
+                self._log_trade(action_event="TP1_NO_SPLIT", exit_price=self.current_price,
+                                note="Pozisyon bölünemeyecek kadar küçük — RISK_ZERO'ya geçildi")
+                if self.action_log_cb:
+                    symbol = self.inst_id.replace("-SWAP", "")
+                    self.action_log_cb(
+                        f"🛡️ [{symbol}] Pozisyon lot boyutu nedeniyle bölünemedi. "
+                        f"Direkt RISK_ZERO moduna geçildi. Başa Baş SL + Eşik 2 TP OCO emri kuruluyor..."
+                    )
+                asyncio.create_task(self.set_exchange_oco_order(
+                    tp_trigger_px=self.tp2_target,
+                    sl_trigger_px=self.breakeven_px
+                ))
+                logger.info(f"[{self.inst_id}] State transitioned to RISK_ZERO (no-split path)")
+                return  # finally block releases lock
+
             # Determine close side (opposite of position side)
             close_side = "sell" if self.side == "long" else "buy"
             
             # 2. Apply limit tolerance buffer
-            # Close LONG (sell): Place order slightly below price. limit_price = price * (1 - limit_tolerance)
-            # Close SHORT (buy): Place order slightly above price. limit_price = price * (1 + limit_tolerance)
+            # LONG close (SELL):  place below market so we get filled as price rises to target.
+            #   exit_price = current - 0.5*ATR  →  limit_px = exit_price * (1 - tol)  → well below market
+            # SHORT close (BUY):  exit_price is already current - 0.5*ATR (below market).
+            #   Tolerance brings it slightly ABOVE that floor, still comfortably below market.
+            #   This keeps the limit price inside the allowed OKX range.
             tolerance = self.profile["limit_tolerance"]
             if close_side == "sell":
                 limit_px = price * (1.0 - tolerance)
             else:
+                # For BUY (close short): add tolerance to bring limit_px up toward market
                 limit_px = price * (1.0 + tolerance)
                 
             # Round price to tickSz steps
@@ -457,12 +485,57 @@ class PositionTracker:
                 mgn_mode=self.mgn_mode
             )
             
-            if not order_res or order_res.get("code") != "0":
+            # --- CRITICAL: If limit fails, do NOT release lock. Fall straight to market order. ---
+            limit_placement_failed = (not order_res or order_res.get("code") != "0")
+            if limit_placement_failed:
                 err_msg = order_res.get("msg", "Unknown error") if order_res else "No response"
-                logger.error(f"[{self.inst_id}] Limit order placement failed: {err_msg}")
-                self.is_locked = False
+                logger.error(f"[{self.inst_id}] Limit order placement failed: {err_msg}. Falling back to MARKET order immediately.")
                 self.exchange.unregister_order_event(cl_ord_id)
-                return
+                market_cl_ord_id = f"AegisMKT{uuid.uuid4().hex[:16]}"[:30]
+                logger.info(f"[{self.inst_id}] Placing emergency Market Order {market_cl_ord_id} for size {sz_str}")
+                market_res = await self.exchange.place_order(
+                    inst_id=self.inst_id,
+                    side=close_side,
+                    ord_type="market",
+                    sz=sz_str,
+                    cl_ord_id=market_cl_ord_id,
+                    pos_side=self.pos_side,
+                    mgn_mode=self.mgn_mode
+                )
+                if market_res and market_res.get("code") == "0":
+                    logger.info(f"[{self.inst_id}] Emergency Market Order {market_cl_ord_id} placed successfully.")
+                    actual_filled_sz = sz
+                else:
+                    market_err = market_res.get("msg", "Unknown") if market_res else "No response"
+                    logger.critical(f"[{self.inst_id}] Emergency market order also failed: {market_err}. Aborting exit.")
+                    return  # keep is_locked=False via finally block, but state unchanged
+                # Jump directly to FSM state transition
+                self.size = max(0.0, self.size - actual_filled_sz)
+                lot_sz_str_fb = inst_info.get("lotSz", "1")
+                if "." in lot_sz_str_fb:
+                    prec_fb = len(lot_sz_str_fb.split(".")[1].rstrip("0"))
+                    self.size = round(self.size, prec_fb)
+                else:
+                    self.size = round(self.size, 0)
+                logger.info(f"[{self.inst_id}] Emergency exit complete. Remaining size: {self.size}")
+                if label == "TP1":
+                    if self.size <= 0.0001:
+                        self.state = "CLOSED"
+                    else:
+                        self.state = "RISK_ZERO"
+                        self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=self.current_price, note="30% Kısmi Kâr Alma (Market Emir)")
+                        if self.action_log_cb:
+                            symbol = self.inst_id.replace("-SWAP", "")
+                            self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış (market) onaylandı. Başa Baş + Eşik 2 OCO emri kuruluyor...")
+                        asyncio.create_task(self.set_exchange_oco_order(
+                            tp_trigger_px=self.tp2_target,
+                            sl_trigger_px=self.breakeven_px
+                        ))
+                else:
+                    self.state = "CLOSED"
+                    self._log_trade(action_event=label, exit_price=self.current_price, note="Pozisyon Tamamen Kapatıldı")
+                logger.info(f"[{self.inst_id}] State transitioned to {self.state} (emergency market path)")
+                return  # finally block will run and release lock
 
             ord_id = order_res["data"][0]["ordId"]
             logger.info(f"[{self.inst_id}] Limit Order placed successfully. OKX OrdId={ord_id}. Starting 300ms timeout check...")
@@ -557,10 +630,11 @@ class PositionTracker:
                         self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış onaylandı. [{self.side.upper()} - {self.lever}x] Stop-Loss noktası komisyonlar dahil BAŞA BAŞ seviyesine kilitlendi. Durum: RISK_ZERO (Risk Sıfır!).")
                         
                     self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=price, note="30% Kısmi Kâr Alma")
-                    # Place BreakEven stop loss order on the exchange
-                    asyncio.create_task(self.set_exchange_stop_loss(self.breakeven_px))
-                    # Place Eşik 2 Take Profit order on the exchange
-                    asyncio.create_task(self.set_exchange_take_profit(self.tp2_target))
+                    # Place BreakEven Stop Loss AND Eşik 2 Take Profit as a single OCO order
+                    asyncio.create_task(self.set_exchange_oco_order(
+                        tp_trigger_px=self.tp2_target,
+                        sl_trigger_px=self.breakeven_px
+                    ))
 
             else:  # TP2_EXIT, TRAILING_EXIT, or BE_EXIT
                 self.state = "CLOSED"
@@ -664,15 +738,98 @@ class PositionTracker:
         except Exception as e:
             logger.exception(f"[{self.inst_id}] Exception in set_exchange_take_profit: {e}")
 
+    async def set_exchange_oco_order(self, tp_trigger_px: float, sl_trigger_px: float):
+        """Places a combined OCO (Take-Profit + Stop-Loss) order on the exchange."""
+        try:
+            # 1. Cancel existing algo orders if any
+            if getattr(self, "algo_sl_id", None) and self.algo_sl_id != self.algo_tp_id:
+                await self.exchange.cancel_algo_order(self.inst_id, self.algo_sl_id)
+                self.algo_sl_id = None
+            if getattr(self, "algo_tp_id", None):
+                await self.exchange.cancel_algo_order(self.inst_id, self.algo_tp_id)
+                self.algo_tp_id = None
+
+            # Get instrument info for precision
+            inst_info = self.exchange.get_instrument_info(self.inst_id)
+            tick_sz = float(inst_info.get("tickSz", "0.01"))
+            
+            # Format trigger prices
+            rounded_tp = round(tp_trigger_px / tick_sz) * tick_sz
+            tp_str = f"{rounded_tp:.8f}".rstrip("0").rstrip(".")
+            
+            rounded_sl = round(sl_trigger_px / tick_sz) * tick_sz
+            sl_str = f"{rounded_sl:.8f}".rstrip("0").rstrip(".")
+            
+            sz_str = f"{self.size:.8f}".rstrip("0").rstrip(".")
+            
+            close_side = "sell" if self.side == "long" else "buy"
+            
+            logger.info(f"[{self.inst_id}] Placing new OCO order (TP: {tp_str}, SL: {sl_str}) for size {sz_str}...")
+            res = await self.exchange.place_algo_order(
+                inst_id=self.inst_id,
+                side=close_side,
+                ord_type="oco",
+                sz=sz_str,
+                pos_side=self.pos_side,
+                mgn_mode=self.mgn_mode,
+                tp_trigger_px=tp_str,
+                tp_ord_px="-1",
+                sl_trigger_px=sl_str,
+                sl_ord_px="-1"
+            )
+            
+            if res and res.get("code") == "0" and "data" in res:
+                algo_id = res["data"][0]["algoId"]
+                self.algo_tp_id = algo_id
+                self.algo_sl_id = algo_id
+                self.last_placed_tp_px = tp_trigger_px
+                self.last_placed_sl_px = sl_trigger_px
+                logger.info(f"[{self.inst_id}] Exchange OCO order placed successfully. AlgoId: {algo_id}")
+            else:
+                err_msg = res.get("msg", "Unknown error") if res else "No response"
+                logger.error(f"[{self.inst_id}] Failed to place exchange OCO order: {err_msg}")
+        except Exception as e:
+            logger.exception(f"[{self.inst_id}] Exception in set_exchange_oco_order: {e}")
+
     async def cancel_exchange_take_profit(self):
-        """Cancels the Take-Profit algo order on the exchange if it exists."""
+        """Cancels the Take-Profit algo order on the exchange if it exists.
+        Also clears algo_sl_id when both point to the same OCO order."""
         try:
             if getattr(self, "algo_tp_id", None):
                 logger.info(f"[{self.inst_id}] Cancelling exchange take profit order {self.algo_tp_id}...")
                 await self.exchange.cancel_algo_order(self.inst_id, self.algo_tp_id)
+                # If both IDs pointed to the same OCO order, clear both
+                if self.algo_sl_id == self.algo_tp_id:
+                    self.algo_sl_id = None
                 self.algo_tp_id = None
         except Exception as e:
             logger.exception(f"[{self.inst_id}] Exception in cancel_exchange_take_profit: {e}")
+
+    async def _transition_to_trailing_stop(self, trailing_px: float):
+        """Atomically cancels the existing OCO/TP/SL order and places a new trailing stop.
+        
+        Used in the Eşik 2 momentum branch to avoid race conditions between
+        cancel_exchange_take_profit and set_exchange_stop_loss running concurrently.
+        """
+        try:
+            # Step 1: Cancel the existing OCO (or any TP/SL) atomically
+            algo_id_to_cancel = getattr(self, "algo_tp_id", None) or getattr(self, "algo_sl_id", None)
+            if algo_id_to_cancel:
+                logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] Cancelling existing OCO/algo order {algo_id_to_cancel}...")
+                await self.exchange.cancel_algo_order(self.inst_id, algo_id_to_cancel)
+                self.algo_tp_id = None
+                self.algo_sl_id = None
+                self.last_placed_tp_px = None
+                self.last_placed_sl_px = None
+                logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] OCO/algo order cancelled successfully.")
+            else:
+                logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] No existing OCO/algo order to cancel.")
+
+            # Step 2: Place the new trailing stop
+            await self.set_exchange_stop_loss(trailing_px)
+            logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] Trailing stop placed at {trailing_px:.6f}. Ready.")
+        except Exception as e:
+            logger.exception(f"[{self.inst_id}] Exception in _transition_to_trailing_stop: {e}")
 
     def calculate_ob_multiplier(self) -> float:
         """Calculates the dynamic ATR multiplier based on orderbook imbalance."""

@@ -272,8 +272,15 @@ if "last_state" not in st.session_state:
 # Fallback for Streamlit versions supporting st.fragment or st.experimental_fragment
 if hasattr(st, "fragment"):
     fragment_decorator = st.fragment
-else:
+elif hasattr(st, "experimental_fragment"):
     fragment_decorator = st.experimental_fragment
+else:
+    def fragment_decorator(*args, **kwargs):
+        def decorator(func):
+            return func
+        if len(args) == 1 and callable(args[0]):
+            return args[0]
+        return decorator
 
 # Sidebar inputs (remains in global scope to be completely static and focus-safe)
 is_muted = st.sidebar.checkbox("🔊 Sesi Kapat (Mute)", value=False)
