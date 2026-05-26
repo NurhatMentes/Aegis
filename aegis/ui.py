@@ -693,7 +693,29 @@ def render_historical_view():
         if os.path.exists(ledger_path):
             try:
                 df = pd.read_csv(ledger_path)
-                st.dataframe(df, use_container_width=True, hide_index=True)
+                if df.empty:
+                    st.info("Henüz kaydedilmiş bir işlem verisi (Ledger) bulunmuyor.")
+                else:
+                    if "session_id" in df.columns:
+                        # Palette of elegant dark backgrounds for grouping
+                        colors = [
+                            "background-color: rgba(56, 189, 248, 0.08);",  # Subtle Slate Blue
+                            "background-color: rgba(139, 92, 246, 0.08);", # Subtle Dark Purple
+                            "background-color: rgba(20, 184, 166, 0.08);",  # Subtle Teal
+                            "background-color: rgba(245, 158, 11, 0.08);",  # Subtle Amber
+                            "background-color: rgba(239, 68, 68, 0.08);"    # Subtle Red
+                        ]
+                        unique_sessions = df["session_id"].unique()
+                        session_color_map = {sess: colors[i % len(colors)] for i, sess in enumerate(unique_sessions)}
+                        
+                        def style_rows(row):
+                            style_str = session_color_map.get(row["session_id"], "")
+                            return [style_str] * len(row)
+                            
+                        styled_df = df.style.apply(style_rows, axis=1)
+                        st.dataframe(styled_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.dataframe(df, use_container_width=True, hide_index=True)
             except Exception as e:
                 st.error(f"Kayıtlar okunurken hata oluştu: {e}")
         else:
