@@ -186,6 +186,9 @@ class PositionTracker:
                     symbol = self.inst_id.replace("-SWAP", "")
                     self.action_log_cb(f"🎯 [{symbol}] Eşik 1 (%40 Hedef) yakalandı! [{self.side.upper()} - {self.lever}x] Pozisyonun %30'u için LİMİT kapatma emri fırlatıldı.")
                 
+                # Cancel original TP/SL orders on the exchange
+                asyncio.create_task(self.exchange.cancel_algo_orders(self.inst_id))
+                
                 # Calculate exit price with a 0.5 * ATR buffer
                 if self.side == "long":
                     exit_price = self.current_price - (0.5 * self.atr)
@@ -249,12 +252,16 @@ class PositionTracker:
                     if self.action_log_cb:
                         symbol = self.inst_id.replace("-SWAP", "")
                         self.action_log_cb(f"📈 [{symbol}] Eşik 2 (Tam Hedef) yakalandı! [{self.side.upper()} - {self.lever}x] Hacim güçlü ({self.volume_ratio:.2f}x). Orijinal TP iptal edildi, Takipçi Stop ${self.trailing_stop:.6f} seviyesinden aktif edildi.")
+                    
+                    # Cancel original TP/SL orders on the exchange
+                    asyncio.create_task(self.exchange.cancel_algo_orders(self.inst_id))
                 else:
                     # No momentum: Execute 100% exit immediately
                     logger.info(f"[{self.inst_id}] Normal momentum (VolRatio={self.volume_ratio:.2f}, OBImb={self.ob_imbalance:.2f}). "
                                 f"Triggering immediate 100% exit (TP2_EXIT)")
                     if self.action_log_cb:
                         self.action_log_cb(f"⚡ [{self.inst_id}] Eşik 2 Triggered at ${self.current_price:.6f}. Normal momentum, immediate 100% exit.")
+                    asyncio.create_task(self.exchange.cancel_algo_orders(self.inst_id))
                     asyncio.create_task(self.execute_smart_exit(size_pct=1.0, price=self.current_price, label="TP2_EXIT"))
 
         elif self.state == "TRAILING":
@@ -303,6 +310,15 @@ class PositionTracker:
             # Round sz to lotSz steps
             sz_units = round(raw_sz / lot_sz)
             sz = sz_units * lot_sz
+            
+            # Ensure sz is at least lot_sz if we have a position
+            if sz < lot_sz and self.size > 0:
+                sz = lot_sz
+            # Ensure sz does not exceed the tracker's current size
+            if sz > self.size:
+                sz = round(self.size / lot_sz) * lot_sz
+                if sz > self.size:
+                    sz = int(self.size / lot_sz) * lot_sz
             
             if sz <= 0:
                 logger.warning(f"[{self.inst_id}] Calculated close size {sz} is 0. Aborting.")

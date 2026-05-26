@@ -198,6 +198,53 @@ class OKXExchange:
             
         return await self.request("POST", path, data=body)
 
+    async def cancel_algo_orders(self, inst_id: str) -> bool:
+        """Fetches and cancels all pending algo orders (conditional, oco, trigger) for the instrument."""
+        logger.info(f"[{inst_id}] Initiating cancel for all pending algo orders...")
+        algo_types = ["conditional", "oco", "trigger"]
+        all_algos = []
+        for otype in algo_types:
+            try:
+                path = f"/api/v5/trade/orders-algo-pending?instType=SWAP&ordType={otype}&instId={inst_id}"
+                res = await self.request("GET", path)
+                if res and res.get("code") == "0":
+                    all_algos.extend(res.get("data", []))
+            except Exception as e:
+                logger.error(f"[{inst_id}] Failed fetching pending algos ({otype}): {e}")
+
+        if not all_algos:
+            logger.info(f"[{inst_id}] No pending algo orders found to cancel.")
+            return True
+
+        # Cancel list construction
+        cancel_payload = []
+        for algo in all_algos:
+            algo_id = algo.get("algoId")
+            if algo_id:
+                cancel_payload.append({
+                    "algoId": algo_id,
+                    "instId": inst_id
+                })
+
+        success = True
+        # Batch cancel in chunks of 10
+        for i in range(0, len(cancel_payload), 10):
+            chunk = cancel_payload[i:i+10]
+            try:
+                path = "/api/v5/trade/cancel-algos"
+                res = await self.request("POST", path, data=chunk)
+                if res and res.get("code") == "0":
+                    logger.info(f"[{inst_id}] Successfully cancelled {len(chunk)} algo orders.")
+                else:
+                    err_msg = res.get("msg", "Unknown error") if res else "No response"
+                    logger.error(f"[{inst_id}] Failed cancelling algo orders chunk: {err_msg}")
+                    success = False
+            except Exception as e:
+                logger.error(f"[{inst_id}] Exception during algo cancellation chunk: {e}")
+                success = False
+
+        return success
+
     async def get_order(self, inst_id: str, ord_id: str) -> dict:
         """Queries order status details."""
         path = f"/api/v5/trade/order?instId={inst_id}&ordId={ord_id}"
@@ -454,6 +501,13 @@ class AegisOrchestrator:
             return
             
         tracker = self.active_trackers.pop(inst_id)
+        
+        # If tracker is not CLOSED (closed externally or offline), log to CSV ledger
+        if tracker.state != "CLOSED":
+            tracker.state = "CLOSED"
+            exit_price = tracker.current_price if tracker.current_price > 0 else tracker.entry_price
+            tracker._log_trade(action_event="EXTERNAL_CLOSE", exit_price=exit_price, note=f"Closed externally: {reason}")
+            
         tracker.state = "CLOSED"
         
         # Request dynamic unsubscribe
@@ -485,15 +539,16 @@ class AegisOrchestrator:
                     
                     # Fetch algo orders to sync TP from exchange
                     algo_orders = []
-                    try:
-                        res_algo = await self.exchange.request("GET", "/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=conditional")
-                        if res_algo and res_algo.get("code") == "0":
-                            algo_orders.extend(res_algo.get("data", []))
-                        res_oco = await self.exchange.request("GET", "/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=oco")
-                        if res_oco and res_oco.get("code") == "0":
-                            algo_orders.extend(res_oco.get("data", []))
-                    except Exception as e:
-                        logger.error(f"Failed to fetch algo orders: {e}")
+                    if self.active_trackers:
+                        try:
+                            res_algo = await self.exchange.request("GET", "/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=conditional")
+                            if res_algo and res_algo.get("code") == "0":
+                                algo_orders.extend(res_algo.get("data", []))
+                            res_oco = await self.exchange.request("GET", "/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=oco")
+                            if res_oco and res_oco.get("code") == "0":
+                                algo_orders.extend(res_oco.get("data", []))
+                        except Exception as e:
+                            logger.error(f"Failed to fetch algo orders: {e}")
                         
                     exchange_tp_px_map = {}
                     for algo in algo_orders:

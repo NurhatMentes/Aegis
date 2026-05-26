@@ -39,6 +39,10 @@ class MockExchange:
         self.cancelled_orders.append({"inst_id": inst_id, "ord_id": ord_id, "cl_ord_id": cl_ord_id})
         return {"code": "0", "msg": "Cancelled"}
 
+    async def cancel_algo_orders(self, inst_id):
+        self.cancelled_orders.append({"inst_id": inst_id, "ord_type": "algo"})
+        return True
+
     async def get_order(self, inst_id, ord_id):
         # Return fully filled status
         return {"code": "0", "msg": "Success", "data": [{"ordId": ord_id, "state": "filled", "accFillSz": "3"}]}
@@ -64,7 +68,8 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
             ct_val=0.01,
             exchange_interface=exchange,
             mgn_mode="isolated",
-            pos_side="long"
+            pos_side="long",
+            esik1_fraction=0.40
         )
         
         # Verify initial calculations
