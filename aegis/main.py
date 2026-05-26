@@ -180,8 +180,9 @@ class OKXExchange:
             body["px"] = px
         if cl_ord_id:
             body["clOrdId"] = cl_ord_id
-        if pos_side:
+        if pos_side and pos_side != "net":
             body["posSide"] = pos_side
+
             
         return await self.request("POST", path, data=body)
 
@@ -212,8 +213,9 @@ class OKXExchange:
             "sz": sz,
             "reduceOnly": True
         }
-        if pos_side:
+        if pos_side and pos_side != "net":
             body["posSide"] = pos_side
+
         if tp_trigger_px:
             body["tpTriggerPx"] = tp_trigger_px
             body["tpOrdPx"] = tp_ord_px
