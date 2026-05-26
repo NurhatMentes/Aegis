@@ -578,7 +578,7 @@ class AegisOrchestrator:
         while True:
             try:
                 op, inst_id = await self.ws_sub_queue.get()
-                if not self.public_websocket or self.public_websocket.closed:
+                if not self.public_websocket:
                     self.ws_sub_queue.task_done()
                     continue
                     
@@ -880,7 +880,7 @@ class AegisOrchestrator:
 
     async def _ws_heartbeat_loop(self, ws, name: str):
         """Sends heartbeats every 30s, expects reply in 5s or drops connection."""
-        while not ws.closed:
+        while True:
             try:
                 await asyncio.sleep(30)
                 t_start = time.time()
