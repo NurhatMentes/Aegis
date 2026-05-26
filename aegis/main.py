@@ -492,7 +492,7 @@ class AegisOrchestrator:
         
         # Request dynamic public WS subscription for the new instrument
         await self.ws_sub_queue.put(("subscribe", inst_id))
-        self.add_action_log(f"🟢 POSITION ACQUIRED: {inst_id} | Size: {size} | Entry: ${entry_price:.6f}")
+        self.add_action_log(f"🟢 POZİSYON DEVRALINDI: {inst_id} | Büyüklük: {size} | Giriş: ${entry_price:.6f}")
         logger.info(f"Successfully added tracking engine for {inst_id}")
 
     async def remove_tracker(self, inst_id: str, reason: str = ""):
@@ -506,7 +506,12 @@ class AegisOrchestrator:
         if tracker.state != "CLOSED":
             tracker.state = "CLOSED"
             exit_price = tracker.current_price if tracker.current_price > 0 else tracker.entry_price
-            tracker._log_trade(action_event="EXTERNAL_CLOSE", exit_price=exit_price, note=f"Closed externally: {reason}")
+            reason_tr = reason
+            if "No active position found via REST" in reason:
+                reason_tr = "REST senkronizasyonu sırasında aktif pozisyon bulunamadı"
+            elif "WebSocket position size hit 0" in reason:
+                reason_tr = "WebSocket pozisyon büyüklüğü 0'a düştü"
+            tracker._log_trade(action_event="EXTERNAL_CLOSE", exit_price=exit_price, note=f"Dışarıdan kapatıldı: {reason_tr}")
             
         tracker.state = "CLOSED"
         
@@ -523,7 +528,7 @@ class AegisOrchestrator:
             pnl_sign = "+" if pnl_pct >= 0 else ""
             pnl_str = f" | PnL: {pnl_sign}{pnl_pct:.2f}%"
             
-        self.add_action_log(f"🔴 POSITION CLOSED: {inst_id}{pnl_str}")
+        self.add_action_log(f"🔴 POZİSYON KAPATILDI: {inst_id}{pnl_str}")
         logger.info(f"[{inst_id}] Tracking engine closed & removed. Reason: {reason}")
 
     async def rest_sync_loop(self):

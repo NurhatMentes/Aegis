@@ -184,7 +184,7 @@ class PositionTracker:
                 logger.info(f"[{self.inst_id}] EŞİK 1 (TP1) Triggered at price {self.current_price:.6f}")
                 if self.action_log_cb:
                     symbol = self.inst_id.replace("-SWAP", "")
-                    self.action_log_cb(f"🎯 [{symbol}] Eşik 1 (%40 Hedef) yakalandı! [{self.side.upper()} - {self.lever}x] Pozisyonun %30'u için LİMİT kapatma emri fırlatıldı.")
+                    self.action_log_cb(f"🎯 [{symbol}] Eşik 1 (%{int(self.esik1_fraction * 100)} Hedef) yakalandı! [{self.side.upper()} - {self.lever}x] Pozisyonun %30'u için LİMİT kapatma emri fırlatıldı.")
                 
                 # Cancel original TP/SL orders on the exchange
                 asyncio.create_task(self.exchange.cancel_algo_orders(self.inst_id))
@@ -260,7 +260,8 @@ class PositionTracker:
                     logger.info(f"[{self.inst_id}] Normal momentum (VolRatio={self.volume_ratio:.2f}, OBImb={self.ob_imbalance:.2f}). "
                                 f"Triggering immediate 100% exit (TP2_EXIT)")
                     if self.action_log_cb:
-                        self.action_log_cb(f"⚡ [{self.inst_id}] Eşik 2 Triggered at ${self.current_price:.6f}. Normal momentum, immediate 100% exit.")
+                        symbol = self.inst_id.replace("-SWAP", "")
+                        self.action_log_cb(f"⚡ [{symbol}] Eşik 2 ${self.current_price:.6f} seviyesinde tetiklendi. Normal momentum, anında %100 kapatma emri gönderildi.")
                     asyncio.create_task(self.exchange.cancel_algo_orders(self.inst_id))
                     asyncio.create_task(self.execute_smart_exit(size_pct=1.0, price=self.current_price, label="TP2_EXIT"))
 
@@ -276,7 +277,8 @@ class PositionTracker:
                     self.is_locked = True
                     logger.info(f"[{self.inst_id}] Trailing stop breached at {self.current_price:.6f} <= {self.trailing_stop:.6f}. Triggering trailing exit.")
                     if self.action_log_cb:
-                        self.action_log_cb(f"⚡ EXIT TRIGGERED: Trailing Stop Hit at ${self.current_price:.6f}")
+                        symbol = self.inst_id.replace("-SWAP", "")
+                        self.action_log_cb(f"⚡ ÇIKIŞ TETİKLENDİ: [{symbol}] Takipçi Stop ${self.current_price:.6f} seviyesinde tetiklendi.")
                     asyncio.create_task(self.execute_smart_exit(size_pct=1.0, price=self.current_price, label="TRAILING_EXIT"))
 
             elif self.side == "short":
@@ -289,7 +291,8 @@ class PositionTracker:
                     self.is_locked = True
                     logger.info(f"[{self.inst_id}] Trailing stop breached at {self.current_price:.6f} >= {self.trailing_stop:.6f}. Triggering trailing exit.")
                     if self.action_log_cb:
-                        self.action_log_cb(f"⚡ EXIT TRIGGERED: Trailing Stop Hit at ${self.current_price:.6f}")
+                        symbol = self.inst_id.replace("-SWAP", "")
+                        self.action_log_cb(f"⚡ ÇIKIŞ TETİKLENDİ: [{symbol}] Takipçi Stop ${self.current_price:.6f} seviyesinde tetiklendi.")
                     asyncio.create_task(self.execute_smart_exit(size_pct=1.0, price=self.current_price, label="TRAILING_EXIT"))
 
     async def execute_smart_exit(self, size_pct: float, price: float, label: str):
@@ -464,7 +467,7 @@ class PositionTracker:
                         symbol = self.inst_id.replace("-SWAP", "")
                         self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış onaylandı. [{self.side.upper()} - {self.lever}x] Stop-Loss noktası komisyonlar dahil BAŞA BAŞ seviyesine kilitlendi. Durum: RISK_ZERO (Risk Sıfır!).")
                         
-                    self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=price, note="30% Partial Take Profit")
+                    self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=price, note="30% Kısmi Kâr Alma")
             else:  # TP2_EXIT, TRAILING_EXIT, or BE_EXIT
                 self.state = "CLOSED"
                 if self.action_log_cb:
@@ -472,7 +475,7 @@ class PositionTracker:
                     pnl_pct = ((self.current_price - self.entry_price) / self.entry_price * self.lever * 100) if self.side == "long" else ((self.entry_price - self.current_price) / self.entry_price * self.lever * 100)
                     self.action_log_cb(f"🔴 [{symbol}] Pozisyon tamamen kapatıldı. Ses kesildi. | Yön: {self.side.upper()} | Kaldıraç: {self.lever}x | Borsada Gerçekleşen Toplam PnL: {pnl_pct:+.2f}%")
                     
-                self._log_trade(action_event=label, exit_price=self.current_price, note="Position Fully Closed")
+                self._log_trade(action_event=label, exit_price=self.current_price, note="Pozisyon Tamamen Kapatıldı")
                 
             logger.info(f"[{self.inst_id}] State transitioned to {self.state}")
             
