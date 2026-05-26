@@ -281,6 +281,7 @@ else:
 # Parse variables
 sys_state = state.get("system", {})
 trackers = state.get("trackers", {})
+market_data = state.get("market_data", {})
 logs = state.get("logs", [])
 
 ws_connected = sys_state.get("ws_connected", False)
@@ -450,6 +451,36 @@ if True:
         with right_col:
             st.markdown('<div style="font-weight: 700; font-size: 1.2rem; color: #f8fafc; margin-bottom: 1rem; display: flex; align-items:center; gap: 8px;">🎯 Live Position Radar (Canlı Radar)</div>', unsafe_allow_html=True)
             
+            # Display Live Market Data
+            btc_data = market_data.get("BTC-USDT-SWAP")
+            if btc_data:
+                btc_last = btc_data.get("last", 0.0)
+                btc_ask = btc_data.get("ask", 0.0)
+                btc_bid = btc_data.get("bid", 0.0)
+                btc_vol = btc_data.get("vol24h", 0.0)
+                ob_imb = btc_data.get("ob_imbalance", 0.0)
+                ob_color = '#10b981' if ob_imb > 0 else '#ef4444'
+                
+                st.markdown(clean_html(f"""
+                <div class="position-card" style="border-color: #f59e0b; padding: 1rem; margin-bottom: 1.5rem; background: rgba(245, 158, 11, 0.05);">
+                    <div style="display: flex; justify-content: space-between; align-items: center;">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <span style="font-size: 1.8rem;">₿</span>
+                            <div>
+                                <div style="font-size: 1.1rem; font-weight: 800; color: #f8fafc;">BTC-USDT-SWAP <span style="font-size:0.75rem; color:#94a3b8; font-weight:500;">(Live Market)</span></div>
+                                <div style="font-size: 0.85rem; color: #f59e0b; font-weight: 700;">Vol: {btc_vol:,.0f} USDT</div>
+                            </div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="font-size: 1.6rem; font-weight: 800; color: #f8fafc;">${btc_last:,.2f}</div>
+                            <div style="font-size: 0.8rem; color: #94a3b8;">
+                                OB Imbalance: <span style="color:{ob_color}; font-weight:700;">{ob_imb * 100:+.1f}%</span> | Bid: ${btc_bid:,.2f} | Ask: ${btc_ask:,.2f}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                """), unsafe_allow_html=True)
+
             if not trackers:
                 st.markdown(clean_html("""
                 <div style="text-align: center; padding: 4rem; background: rgba(30, 41, 59, 0.2); border-radius: 12px; border: 1px dashed #334155; margin-bottom: 2rem;">

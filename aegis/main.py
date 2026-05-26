@@ -231,6 +231,7 @@ class AegisOrchestrator:
         self.public_websocket = None
         self.private_websocket = None
         self.action_logs = []
+        self.market_data = {}
 
         # Load persisted trackers from state file if available
         self.load_persisted_state()
@@ -304,6 +305,7 @@ class AegisOrchestrator:
                 "active_trackers_count": len(self.active_trackers)
             },
             "trackers": {inst_id: tracker.to_dict() for inst_id, tracker in self.active_trackers.items()},
+            "market_data": self.market_data,
             "logs": rolling_handler.logs,
             "action_logs": self.action_logs
         }
@@ -618,6 +620,13 @@ class AegisOrchestrator:
                     self.pub_ws_connected = True
                     logger.info("OKX Public WebSocket connection established.")
                     
+                    # Always subscribe to BTC-USDT-SWAP
+                    btc_sub = {"op": "subscribe", "args": [
+                        {"channel": "tickers", "instId": "BTC-USDT-SWAP"},
+                        {"channel": "books5", "instId": "BTC-USDT-SWAP"}
+                    ]}
+                    await ws.send(json.dumps(btc_sub))
+                    
                     # Re-subscribe to all active trackers
                     if self.active_trackers:
                         args = []
@@ -649,24 +658,40 @@ class AegisOrchestrator:
                             payload = data["data"]
                             
                             # Route messages to appropriate tracker
-                            if inst_id in self.active_trackers:
-                                tracker = self.active_trackers[inst_id]
-                                if channel == "tickers":
-                                    last_px = float(payload[0]["last"])
+                            if channel == "tickers":
+                                last_px = float(payload[0].get("last", "0"))
+                                if inst_id not in self.market_data: self.market_data[inst_id] = {}
+                                self.market_data[inst_id].update({
+                                    "last": last_px,
+                                    "ask": float(payload[0].get("askPx", "0")),
+                                    "bid": float(payload[0].get("bidPx", "0")),
+                                    "vol24h": float(payload[0].get("volCcy24h", "0")),
+                                })
+                                if inst_id in self.active_trackers:
+                                    tracker = self.active_trackers[inst_id]
                                     tracker.update_tick(current_price=last_px, 
                                                         volume_ratio=tracker.volume_ratio, 
                                                         ob_imbalance=tracker.ob_imbalance)
-                                    self.serialize_state()
-                                    
-                                elif channel == "books5":
-                                    bids = payload[0].get("bids", [])
-                                    asks = payload[0].get("asks", [])
-                                    bid_vol = sum(float(b[1]) for b in bids)
-                                    ask_vol = sum(float(a[1]) for a in asks)
-                                    total_vol = bid_vol + ask_vol
-                                    tracker.ob_imbalance = (bid_vol - ask_vol) / total_vol if total_vol > 0.0 else 0.0
-                                    
-                                elif channel == "candle1m":
+                                self.serialize_state()
+                                
+                            elif channel == "books5":
+                                bids = payload[0].get("bids", [])
+                                asks = payload[0].get("asks", [])
+                                bid_vol = sum(float(b[1]) for b in bids)
+                                ask_vol = sum(float(a[1]) for a in asks)
+                                total_vol = bid_vol + ask_vol
+                                ob_imb = (bid_vol - ask_vol) / total_vol if total_vol > 0.0 else 0.0
+                                
+                                if inst_id not in self.market_data: self.market_data[inst_id] = {}
+                                self.market_data[inst_id]["ob_imbalance"] = ob_imb
+                                
+                                if inst_id in self.active_trackers:
+                                    self.active_trackers[inst_id].ob_imbalance = ob_imb
+                                self.serialize_state()
+                                
+                            if inst_id in self.active_trackers:
+                                tracker = self.active_trackers[inst_id]
+                                if channel == "candle1m":
                                     candle = payload[0]
                                     confirm = candle[8]
                                     if confirm == "1":
