@@ -11,6 +11,7 @@ import aiohttp
 import websockets
 
 import config
+from config import safe_float
 from tracker import PositionTracker
 
 # Setup Logging
@@ -525,6 +526,26 @@ class AegisOrchestrator:
             esik1_fraction=esik1_fraction
         )
         
+        # Check if we can restore algo order IDs and FSM state from persisted state JSON
+        state_path = config.STATE_FILE_PATH
+        if os.path.exists(state_path):
+            try:
+                with open(state_path, "r", encoding="utf-8") as f:
+                    state_data = json.load(f)
+                trackers_state = state_data.get("trackers", {})
+                if inst_id in trackers_state:
+                    t_state = trackers_state[inst_id]
+                    # Restore state
+                    tracker.state = t_state.get("state", "INIT")
+                    tracker.algo_sl_id = t_state.get("algo_sl_id")
+                    tracker.algo_tp_id = t_state.get("algo_tp_id")
+                    tracker.last_placed_sl_px = t_state.get("last_placed_sl_px")
+                    tracker.last_placed_tp_px = t_state.get("last_placed_tp_px")
+                    tracker.session_id = t_state.get("session_id", tracker.session_id)
+                    logger.info(f"[{inst_id}] Restored FSM state={tracker.state}, algo_sl_id={tracker.algo_sl_id}, algo_tp_id={tracker.algo_tp_id} from saved state.")
+            except Exception as e:
+                logger.error(f"Failed to restore tracker state for {inst_id} from JSON: {e}")
+
         self.active_trackers[inst_id] = tracker
         
         # Request dynamic public WS subscription for the new instrument
@@ -544,6 +565,12 @@ class AegisOrchestrator:
             logger.info(f"[{inst_id}] Cleaning up active exchange stop-loss order {tracker.algo_sl_id}...")
             asyncio.create_task(self.exchange.cancel_algo_order(inst_id, tracker.algo_sl_id))
             tracker.algo_sl_id = None
+            
+        # Cancel any active take profit order we placed on the exchange for this tracker
+        if getattr(tracker, "algo_tp_id", None):
+            logger.info(f"[{inst_id}] Cleaning up active exchange take-profit order {tracker.algo_tp_id}...")
+            asyncio.create_task(self.exchange.cancel_algo_order(inst_id, tracker.algo_tp_id))
+            tracker.algo_tp_id = None
 
         
         # If tracker is not CLOSED (closed externally or offline), log to CSV ledger
@@ -635,11 +662,11 @@ class AegisOrchestrator:
                     found_insts = set()
                     for pos_data in active_positions:
                         inst_id = pos_data["instId"]
-                        size = float(pos_data.get("pos", "0"))
-                        avg_px = float(pos_data.get("avgPx", "0"))
+                        size = safe_float(pos_data.get("pos", "0"))
+                        avg_px = safe_float(pos_data.get("avgPx", "0"))
                         pos_side = pos_data.get("posSide", "long")
                         mgn_mode = pos_data.get("mgnMode", "isolated")
-                        lever = float(pos_data.get("lever", "1"))
+                        lever = safe_float(pos_data.get("lever", "1"))
                         
                         # Determine position side (LONG/SHORT)
                         # Net position mode uses sign, long/short mode uses posSide
@@ -925,11 +952,11 @@ class AegisOrchestrator:
                             if channel == "positions":
                                 for pos_data in payload:
                                     inst_id = pos_data["instId"]
-                                    size = float(pos_data.get("pos", "0"))
-                                    avg_px = float(pos_data.get("avgPx", "0"))
+                                    size = safe_float(pos_data.get("pos", "0"))
+                                    avg_px = safe_float(pos_data.get("avgPx", "0"))
                                     pos_side = pos_data.get("posSide", "long")
                                     mgn_mode = pos_data.get("mgnMode", "isolated")
-                                    lever = float(pos_data.get("lever", "1"))
+                                    lever = safe_float(pos_data.get("lever", "1"))
                                     
                                     if pos_side == "net":
                                         side = "long" if size > 0 else "short"
@@ -957,7 +984,7 @@ class AegisOrchestrator:
                                 for order_data in payload:
                                     cl_ord_id = order_data.get("clOrdId", "")
                                     state = order_data.get("state", "")
-                                    filled_sz = float(order_data.get("accFillSz", "0"))
+                                    filled_sz = safe_float(order_data.get("accFillSz", "0"))
                                     
                                     logger.info(f"WebSocket Order Update: clOrdId={cl_ord_id}, state={state}, accFillSz={filled_sz}")
                                     

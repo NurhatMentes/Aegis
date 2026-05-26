@@ -54,3 +54,12 @@ def get_coin_profile(inst_id: str) -> dict:
     If not explicitly listed, returns the DEFAULT fallback profile.
     """
     return COIN_PROFILES.get(inst_id, COIN_PROFILES["DEFAULT"])
+
+def safe_float(val, default=0.0) -> float:
+    if val is None or str(val).strip() == "":
+        return default
+    try:
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+

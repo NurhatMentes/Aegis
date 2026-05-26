@@ -1,7 +1,7 @@
 import asyncio
 import uuid
 import logging
-from config import get_coin_profile
+from config import get_coin_profile, safe_float
 
 logger = logging.getLogger("Aegis.Tracker")
 
@@ -47,6 +47,9 @@ class PositionTracker:
         self.is_locked = False  # Idempotence/lock flag
         self.algo_sl_id = None
         self.last_placed_sl_px = None
+        self.algo_tp_id = None
+        self.last_placed_tp_px = None
+        self.squeeze_defense_active = False
         
         # Trailing variables
         self.highest_price = 0.0
@@ -114,7 +117,12 @@ class PositionTracker:
             "trailing_gap_atr": self.profile.get("trailing_gap_atr", 1.0),
             "mgn_mode": self.mgn_mode,
             "pos_side": self.pos_side,
-            "lever": self.lever
+            "lever": self.lever,
+            "algo_sl_id": getattr(self, "algo_sl_id", None),
+            "algo_tp_id": getattr(self, "algo_tp_id", None),
+            "last_placed_sl_px": getattr(self, "last_placed_sl_px", None),
+            "last_placed_tp_px": getattr(self, "last_placed_tp_px", None),
+            "session_id": self.session_id
         }
 
     def update_targets(self, new_tp_ratio: float, new_esik1_fraction: float = 0.50):
@@ -189,9 +197,6 @@ class PositionTracker:
                     symbol = self.inst_id.replace("-SWAP", "")
                     self.action_log_cb(f"🎯 [{symbol}] Eşik 1 (%{int(self.esik1_fraction * 100)} Hedef) yakalandı! [{self.side.upper()} - {self.lever}x] Pozisyonun %30'u için LİMİT kapatma emri fırlatıldı.")
                 
-                # Cancel original TP/SL orders on the exchange
-                asyncio.create_task(self.exchange.cancel_algo_orders(self.inst_id))
-                
                 # Calculate exit price with a 0.5 * ATR buffer
                 if self.side == "long":
                     exit_price = self.current_price - (0.5 * self.atr)
@@ -260,11 +265,9 @@ class PositionTracker:
                         symbol = self.inst_id.replace("-SWAP", "")
                         self.action_log_cb(f"📈 [{symbol}] Eşik 2 (Tam Hedef) yakalandı! [{self.side.upper()} - {self.lever}x] Hacim güçlü ({self.volume_ratio:.2f}x). Orijinal TP iptal edildi, Takipçi Stop ${self.trailing_stop:.6f} seviyesinden aktif edildi.")
                     
-                    # Cancel original TP/SL orders on the exchange
-                    asyncio.create_task(self.exchange.cancel_algo_orders(self.inst_id))
-                    # Reset local algo sl ID
-                    self.algo_sl_id = None
-                    # Place initial Trailing Stop on the exchange
+                    # Cancel exchange Take-Profit order
+                    asyncio.create_task(self.cancel_exchange_take_profit())
+                    # Place initial Trailing Stop on the exchange (cancels BreakEven SL automatically)
                     asyncio.create_task(self.set_exchange_stop_loss(self.trailing_stop))
                 else:
                     # No momentum: Execute 100% exit immediately
@@ -273,18 +276,38 @@ class PositionTracker:
                     if self.action_log_cb:
                         symbol = self.inst_id.replace("-SWAP", "")
                         self.action_log_cb(f"⚡ [{symbol}] Eşik 2 ${self.current_price:.6f} seviyesinde tetiklendi. Normal momentum, anında %100 kapatma emri gönderildi.")
-                    asyncio.create_task(self.exchange.cancel_algo_orders(self.inst_id))
-                    # Reset local algo sl ID
-                    self.algo_sl_id = None
                     asyncio.create_task(self.execute_smart_exit(size_pct=1.0, price=self.current_price, label="TP2_EXIT"))
 
         elif self.state == "TRAILING":
-            # Trailing Cycle logic
+            # Dynamic OB trailing stop logic
+            mult = self.calculate_ob_multiplier()
+            self.ob_multiplier = mult
+            
+            # Squeeze defense logging
+            is_squeeze = (mult == 0.4)
+            if is_squeeze and not getattr(self, "squeeze_defense_active", False):
+                self.squeeze_defense_active = True
+                logger.warning(f"[{self.inst_id}] CRITICAL BALENA DEFENSE ACTIVATED! OB Imbalance={self.ob_imbalance:.2f}. Collapsing trailing gap to 0.4x ATR.")
+                if self.action_log_cb:
+                    symbol = self.inst_id.replace("-SWAP", "")
+                    self.action_log_cb(f"🚨 [{symbol}] Balina Baskısı Tespit Edildi! Squeeze riski nedeniyle Takipçi Stop 0.4x ATR seviyesine daraltıldı.")
+            elif not is_squeeze:
+                self.squeeze_defense_active = False
+
             if self.side == "long":
                 if self.current_price > self.highest_price:
                     self.highest_price = self.current_price
-                    self.trailing_stop = self.highest_price - (self.profile["trailing_gap_atr"] * self.atr)
-                    logger.debug(f"[{self.inst_id}] New High: {self.highest_price:.6f}, Trailing Stop moved to {self.trailing_stop:.6f}")
+                
+                # Dynamic ATR gap
+                candidate_stop = self.highest_price - (self.ob_multiplier * self.atr)
+                
+                # Jump Protection: Stop only moves tighter (higher)
+                if self.trailing_stop == 0.0:
+                    self.trailing_stop = candidate_stop
+                else:
+                    self.trailing_stop = max(self.trailing_stop, candidate_stop)
+                    
+                logger.debug(f"[{self.inst_id}] Long Trailing: High={self.highest_price:.6f}, Imb={self.ob_imbalance:.2f}, Mult={self.ob_multiplier}, Stop={self.trailing_stop:.6f}")
                 
                 # Check if we should update exchange stop loss
                 should_update = False
@@ -312,8 +335,17 @@ class PositionTracker:
             elif self.side == "short":
                 if self.current_price < self.lowest_price:
                     self.lowest_price = self.current_price
-                    self.trailing_stop = self.lowest_price + (self.profile["trailing_gap_atr"] * self.atr)
-                    logger.debug(f"[{self.inst_id}] New Low: {self.lowest_price:.6f}, Trailing Stop moved to {self.trailing_stop:.6f}")
+                
+                # Dynamic ATR gap
+                candidate_stop = self.lowest_price + (self.ob_multiplier * self.atr)
+                
+                # Jump Protection: Stop only moves tighter (lower)
+                if self.trailing_stop == 0.0:
+                    self.trailing_stop = candidate_stop
+                else:
+                    self.trailing_stop = min(self.trailing_stop, candidate_stop)
+                    
+                logger.debug(f"[{self.inst_id}] Short Trailing: Low={self.lowest_price:.6f}, Imb={self.ob_imbalance:.2f}, Mult={self.ob_multiplier}, Stop={self.trailing_stop:.6f}")
 
                 # Check if we should update exchange stop loss
                 should_update = False
@@ -346,6 +378,11 @@ class PositionTracker:
         logger.info(f"[{self.inst_id}] Initiating Smart Exit ({label}) for {size_pct*100}% of position")
         
         try:
+            # Cancel all outstanding exchange algo orders (SL/TP) first to free up margin
+            logger.info(f"[{self.inst_id}] Cancelling pending exchange algo orders before smart exit...")
+            await self.exchange.cancel_algo_orders(self.inst_id)
+            self.algo_sl_id = None
+            self.algo_tp_id = None
             # 1. Round/Format order size
             # Order size is size * size_pct. Let's get instrument info from exchange
             inst_info = self.exchange.get_instrument_info(self.inst_id)
@@ -458,7 +495,7 @@ class PositionTracker:
                 ord_status = await self.exchange.get_order(self.inst_id, ord_id=ord_id)
                 if ord_status and ord_status.get("code") == "0":
                     order_data = ord_status["data"][0]
-                    actual_filled_sz = float(order_data.get("accFillSz", "0"))
+                    actual_filled_sz = safe_float(order_data.get("accFillSz", "0"))
                     state = order_data.get("state")
                     logger.info(f"[{self.inst_id}] Post-cancel order state: {state}, accFillSz: {actual_filled_sz}")
                 else:
@@ -522,6 +559,8 @@ class PositionTracker:
                     self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=price, note="30% Kısmi Kâr Alma")
                     # Place BreakEven stop loss order on the exchange
                     asyncio.create_task(self.set_exchange_stop_loss(self.breakeven_px))
+                    # Place Eşik 2 Take Profit order on the exchange
+                    asyncio.create_task(self.set_exchange_take_profit(self.tp2_target))
 
             else:  # TP2_EXIT, TRAILING_EXIT, or BE_EXIT
                 self.state = "CLOSED"
@@ -582,4 +621,73 @@ class PositionTracker:
                 logger.error(f"[{self.inst_id}] Failed to place exchange Stop-Loss: {err_msg}")
         except Exception as e:
             logger.exception(f"[{self.inst_id}] Exception in set_exchange_stop_loss: {e}")
+
+    async def set_exchange_take_profit(self, trigger_px: float):
+        """Places or updates a take-profit algo order on the exchange for the remaining size."""
+        try:
+            # 1. Cancel existing take profit if any
+            if getattr(self, "algo_tp_id", None):
+                logger.info(f"[{self.inst_id}] Cancelling existing exchange take profit order {self.algo_tp_id}...")
+                await self.exchange.cancel_algo_order(self.inst_id, self.algo_tp_id)
+                self.algo_tp_id = None
+
+            # Get instrument info for precision
+            inst_info = self.exchange.get_instrument_info(self.inst_id)
+            tick_sz = float(inst_info.get("tickSz", "0.01"))
+            
+            # Format trigger price
+            rounded_trigger = round(trigger_px / tick_sz) * tick_sz
+            px_str = f"{rounded_trigger:.8f}".rstrip("0").rstrip(".")
+            sz_str = f"{self.size:.8f}".rstrip("0").rstrip(".")
+            
+            close_side = "sell" if self.side == "long" else "buy"
+            
+            logger.info(f"[{self.inst_id}] Placing new exchange Take-Profit at {px_str} for size {sz_str}...")
+            res = await self.exchange.place_algo_order(
+                inst_id=self.inst_id,
+                side=close_side,
+                ord_type="conditional",
+                sz=sz_str,
+                pos_side=self.pos_side,
+                mgn_mode=self.mgn_mode,
+                tp_trigger_px=px_str,
+                tp_ord_px="-1"
+            )
+            
+            if res and res.get("code") == "0" and "data" in res:
+                self.algo_tp_id = res["data"][0]["algoId"]
+                self.last_placed_tp_px = trigger_px
+                logger.info(f"[{self.inst_id}] Exchange Take-Profit placed successfully. AlgoId: {self.algo_tp_id}, Price: {self.last_placed_tp_px}")
+            else:
+                err_msg = res.get("msg", "Unknown error") if res else "No response"
+                logger.error(f"[{self.inst_id}] Failed to place exchange Take-Profit: {err_msg}")
+        except Exception as e:
+            logger.exception(f"[{self.inst_id}] Exception in set_exchange_take_profit: {e}")
+
+    async def cancel_exchange_take_profit(self):
+        """Cancels the Take-Profit algo order on the exchange if it exists."""
+        try:
+            if getattr(self, "algo_tp_id", None):
+                logger.info(f"[{self.inst_id}] Cancelling exchange take profit order {self.algo_tp_id}...")
+                await self.exchange.cancel_algo_order(self.inst_id, self.algo_tp_id)
+                self.algo_tp_id = None
+        except Exception as e:
+            logger.exception(f"[{self.inst_id}] Exception in cancel_exchange_take_profit: {e}")
+
+    def calculate_ob_multiplier(self) -> float:
+        """Calculates the dynamic ATR multiplier based on orderbook imbalance."""
+        if self.side == "long":
+            if self.ob_imbalance > 0.15:
+                return 1.5
+            elif self.ob_imbalance < -0.20:
+                return 0.4
+            else:
+                return 1.0
+        else:  # short
+            if self.ob_imbalance < -0.15:
+                return 1.5
+            elif self.ob_imbalance > 0.20:
+                return 0.4
+            else:
+                return 1.0
 
