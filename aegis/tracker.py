@@ -70,11 +70,12 @@ class PositionTracker:
         if self.side == "long":
             self.tp1_target = self.entry_price * (1.0 + self.target_tp_fraction * self.esik1_fraction)
             self.tp2_target = self.entry_price * (1.0 + self.target_tp_fraction)
-            self.breakeven_px = self.entry_price * 1.001
+            self.breakeven_px = self.entry_price
         else:
             self.tp1_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction)
             self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction)
-            self.breakeven_px = self.entry_price * 0.999
+            self.breakeven_px = self.entry_price
+
             
         if self.action_log_cb:
             e1_pct = self.target_tp_ratio * self.esik1_fraction
