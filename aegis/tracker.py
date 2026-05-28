@@ -238,45 +238,48 @@ class PositionTracker:
                 self.is_locked = True
                 logger.info(f"[{self.inst_id}] EŞİK 2 (TP2) Triggered at price {self.current_price:.6f}")
                 
-                # Check momentum and orderbook wall support
-                # LONG: volume_ratio > 2.0 and ob_imbalance > 0.15 (bullish momentum)
-                # SHORT: volume_ratio > 2.0 and ob_imbalance < -0.15 (bearish momentum)
-                is_momentum_strong = False
-                if self.side == "long" and self.volume_ratio > 2.0 and self.ob_imbalance > 0.15:
-                    is_momentum_strong = True
-                elif self.side == "short" and self.volume_ratio > 2.0 and self.ob_imbalance < -0.15:
-                    is_momentum_strong = True
-
-                if is_momentum_strong:
-                    # Transition to TRAILING mode
-                    self.state = "TRAILING"
-                    if self.side == "long":
-                        self.highest_price = self.current_price
-                        self.trailing_stop = self.highest_price - (self.profile["trailing_gap_atr"] * self.atr)
-                    else:
-                        self.lowest_price = self.current_price
-                        self.trailing_stop = self.lowest_price + (self.profile["trailing_gap_atr"] * self.atr)
-                    
-                    self.is_locked = False
-                    logger.info(f"[{self.inst_id}] Strong momentum detected (VolRatio={self.volume_ratio:.2f}, OBImb={self.ob_imbalance:.2f}). "
-                                f"Transitioned to TRAILING. Initial Trailing Stop={self.trailing_stop:.6f}")
-                    if self.action_log_cb:
-                        symbol = self.inst_id.replace("-SWAP", "")
-                        self.action_log_cb(f"📈 [{symbol}] Eşik 2 (Tam Hedef) yakalandı! [{self.side.upper()} - {self.lever}x] Hacim güçlü ({self.volume_ratio:.2f}x). Orijinal TP iptal edildi, Takipçi Stop ${self.trailing_stop:.6f} seviyesinden aktif edildi.")
-                    
-                    # Cancel the existing OCO order (TP+SL) and place trailing stop atomically.
-                    # Using a single sequential coroutine avoids the race condition where
-                    # set_exchange_stop_loss tries to cancel algo_sl_id that is still being
-                    # cancelled by cancel_exchange_take_profit.
-                    asyncio.create_task(self._transition_to_trailing_stop(self.trailing_stop))
+                # Seçenek 2: Eşik 2'ye ulaşıldığında KOŞULSUZ olarak TRAILING moduna geç.
+                # Hacim ve emir defteri verisi (ob_imbalance) trailing aktifken stop mesafesini
+                # daraltmak / genişletmek için kullanılır (calculate_ob_multiplier).
+                # Balina duvarı tespit edilirse stop sıkışır, momentum güçlüyse stop genişler.
+                
+                # Trailing stop başlangıç noktası: mevcut fiyat
+                # Gap hesabı: calculate_ob_multiplier() zaten ob_imbalance'a göre dinamik
+                initial_mult = self.calculate_ob_multiplier()
+                
+                self.state = "TRAILING"
+                if self.side == "long":
+                    self.highest_price = self.current_price
+                    self.trailing_stop = self.highest_price - (initial_mult * self.atr)
                 else:
-                    # No momentum: Execute 100% exit immediately
-                    logger.info(f"[{self.inst_id}] Normal momentum (VolRatio={self.volume_ratio:.2f}, OBImb={self.ob_imbalance:.2f}). "
-                                f"Triggering immediate 100% exit (TP2_EXIT)")
-                    if self.action_log_cb:
-                        symbol = self.inst_id.replace("-SWAP", "")
-                        self.action_log_cb(f"⚡ [{symbol}] Eşik 2 ${self.current_price:.6f} seviyesinde tetiklendi. Normal momentum, anında %100 kapatma emri gönderildi.")
-                    asyncio.create_task(self.execute_smart_exit(size_pct=1.0, price=self.current_price, label="TP2_EXIT"))
+                    self.lowest_price = self.current_price
+                    self.trailing_stop = self.lowest_price + (initial_mult * self.atr)
+                
+                # Lock'u serbest bırak: TRAILING state'de tick loop çalışmaya devam etmeli
+                self.is_locked = False
+                
+                logger.info(
+                    f"[{self.inst_id}] TRAILING başlatıldı (koşulsuz). "
+                    f"VolRatio={self.volume_ratio:.2f}, OBImb={self.ob_imbalance:.2f}, "
+                    f"Multiplier={initial_mult:.1f}x, InitialStop={self.trailing_stop:.6f}"
+                )
+                if self.action_log_cb:
+                    symbol = self.inst_id.replace("-SWAP", "")
+                    # Multiplier'a göre kullanıcıya bilgi ver
+                    if initial_mult >= 1.5:
+                        market_note = f"Alıcı baskısı güçlü (OB: {self.ob_imbalance:+.2f}) — Geniş takip ({initial_mult:.1f}x ATR)"
+                    elif initial_mult <= 0.4:
+                        market_note = f"🚨 Balina baskısı! (OB: {self.ob_imbalance:+.2f}) — Dar takip ({initial_mult:.1f}x ATR)"
+                    else:
+                        market_note = f"Nötr piyasa (OB: {self.ob_imbalance:+.2f}) — Standart takip ({initial_mult:.1f}x ATR)"
+                    self.action_log_cb(
+                        f"📈 [{symbol}] Eşik 2 (Tam Hedef) yakalandı! [{self.side.upper()} - {self.lever}x] "
+                        f"Takipçi Stop ${self.trailing_stop:.6f} seviyesinden aktif edildi. {market_note}"
+                    )
+                
+                # OCO emrini iptal edip takipçi stop'u atomik olarak kur.
+                # _transition_to_trailing_stop: önce OCO cancel, sonra SL place (sıralı, race condition yok)
+                asyncio.create_task(self._transition_to_trailing_stop(self.trailing_stop))
 
         elif self.state == "TRAILING":
             # Dynamic OB trailing stop logic
