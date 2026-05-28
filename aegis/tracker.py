@@ -50,6 +50,8 @@ class PositionTracker:
         self.algo_tp_id = None
         self.last_placed_tp_px = None
         self.squeeze_defense_active = False
+        # Async lock: exchange SL işlemleri sıralı yürütülür (cancel → place çakışmasını önler)
+        self._sl_lock = asyncio.Lock()
         
         # Trailing variables
         self.highest_price = 0.0
@@ -325,6 +327,9 @@ class PositionTracker:
                         should_update = True
                         
                 if should_update:
+                    # Optimistik güncelleme: task başlamadan önce last_placed_sl_px set et.
+                    # Aksi halde bir sonraki tick de should_update=True görür ve çift task başlatır.
+                    self.last_placed_sl_px = self.trailing_stop
                     asyncio.create_task(self.set_exchange_stop_loss(self.trailing_stop))
 
                 if self.current_price <= self.trailing_stop:
@@ -363,6 +368,9 @@ class PositionTracker:
                         should_update = True
                         
                 if should_update:
+                    # Optimistik güncelleme: task başlamadan önce last_placed_sl_px set et.
+                    # Aksi halde bir sonraki tick de should_update=True görür ve çift task başlatır.
+                    self.last_placed_sl_px = self.trailing_stop
                     asyncio.create_task(self.set_exchange_stop_loss(self.trailing_stop))
 
                 if self.current_price >= self.trailing_stop:
@@ -659,46 +667,50 @@ class PositionTracker:
             self.exchange.notify_state_change()
 
     async def set_exchange_stop_loss(self, trigger_px: float):
-        """Places or updates a stop-loss algo order on the exchange for the remaining size."""
-        try:
-            # 1. Cancel existing stop loss if any
-            if getattr(self, "algo_sl_id", None):
-                logger.info(f"[{self.inst_id}] Cancelling existing exchange stop loss order {self.algo_sl_id}...")
-                await self.exchange.cancel_algo_order(self.inst_id, self.algo_sl_id)
-                self.algo_sl_id = None
+        """Places or updates a stop-loss algo order on the exchange for the remaining size.
+        
+        _sl_lock ile korunur: eş zamanlı iki çağrı cancel → place işlemlerini çakıştıramaz.
+        """
+        async with self._sl_lock:
+            try:
+                # 1. Cancel existing stop loss if any
+                if getattr(self, "algo_sl_id", None):
+                    logger.info(f"[{self.inst_id}] Cancelling existing exchange stop loss order {self.algo_sl_id}...")
+                    await self.exchange.cancel_algo_order(self.inst_id, self.algo_sl_id)
+                    self.algo_sl_id = None
 
-            # Get instrument info for precision
-            inst_info = self.exchange.get_instrument_info(self.inst_id)
-            tick_sz = float(inst_info.get("tickSz", "0.01"))
-            
-            # Format trigger price
-            rounded_trigger = round(trigger_px / tick_sz) * tick_sz
-            px_str = f"{rounded_trigger:.8f}".rstrip("0").rstrip(".")
-            sz_str = f"{self.size:.8f}".rstrip("0").rstrip(".")
-            
-            close_side = "sell" if self.side == "long" else "buy"
-            
-            logger.info(f"[{self.inst_id}] Placing new exchange Stop-Loss at {px_str} for size {sz_str}...")
-            res = await self.exchange.place_algo_order(
-                inst_id=self.inst_id,
-                side=close_side,
-                ord_type="conditional",
-                sz=sz_str,
-                pos_side=self.pos_side,
-                mgn_mode=self.mgn_mode,
-                sl_trigger_px=px_str,
-                sl_ord_px="-1"
-            )
-            
-            if res and res.get("code") == "0" and "data" in res:
-                self.algo_sl_id = res["data"][0]["algoId"]
-                self.last_placed_sl_px = trigger_px
-                logger.info(f"[{self.inst_id}] Exchange Stop-Loss placed successfully. AlgoId: {self.algo_sl_id}, Price: {self.last_placed_sl_px}")
-            else:
-                err_msg = res.get("msg", "Unknown error") if res else "No response"
-                logger.error(f"[{self.inst_id}] Failed to place exchange Stop-Loss: {err_msg}")
-        except Exception as e:
-            logger.exception(f"[{self.inst_id}] Exception in set_exchange_stop_loss: {e}")
+                # Get instrument info for precision
+                inst_info = self.exchange.get_instrument_info(self.inst_id)
+                tick_sz = float(inst_info.get("tickSz", "0.01"))
+                
+                # Format trigger price
+                rounded_trigger = round(trigger_px / tick_sz) * tick_sz
+                px_str = f"{rounded_trigger:.8f}".rstrip("0").rstrip(".")
+                sz_str = f"{self.size:.8f}".rstrip("0").rstrip(".")
+                
+                close_side = "sell" if self.side == "long" else "buy"
+                
+                logger.info(f"[{self.inst_id}] Placing new exchange Stop-Loss at {px_str} for size {sz_str}...")
+                res = await self.exchange.place_algo_order(
+                    inst_id=self.inst_id,
+                    side=close_side,
+                    ord_type="conditional",
+                    sz=sz_str,
+                    pos_side=self.pos_side,
+                    mgn_mode=self.mgn_mode,
+                    sl_trigger_px=px_str,
+                    sl_ord_px="-1"
+                )
+                
+                if res and res.get("code") == "0" and "data" in res:
+                    self.algo_sl_id = res["data"][0]["algoId"]
+                    self.last_placed_sl_px = trigger_px
+                    logger.info(f"[{self.inst_id}] Exchange Stop-Loss placed successfully. AlgoId: {self.algo_sl_id}, Price: {self.last_placed_sl_px}")
+                else:
+                    err_msg = res.get("msg", "Unknown error") if res else "No response"
+                    logger.error(f"[{self.inst_id}] Failed to place exchange Stop-Loss: {err_msg}")
+            except Exception as e:
+                logger.exception(f"[{self.inst_id}] Exception in set_exchange_stop_loss: {e}")
 
     async def set_exchange_take_profit(self, trigger_px: float):
         """Places or updates a take-profit algo order on the exchange for the remaining size."""
