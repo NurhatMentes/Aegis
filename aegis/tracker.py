@@ -130,6 +130,10 @@ class PositionTracker:
 
     def update_targets(self, new_tp_ratio: float, new_esik1_fraction: float = 0.50):
         """Dynamically updates TP targets if Skynet alters the target_tp_ratio or esik1_fraction on the fly."""
+        # Eşik 1 geçildikten sonra (RISK_ZERO veya TRAILING) hedefleri değiştirmeyi reddet
+        if self.state != "INIT":
+            return
+            
         if abs(self.target_tp_ratio - new_tp_ratio) > 0.0001 or abs(getattr(self, "esik1_fraction", 0.50) - new_esik1_fraction) > 0.0001:
             self.target_tp_ratio = float(new_tp_ratio)
             self.esik1_fraction = float(new_esik1_fraction)
