@@ -328,8 +328,7 @@ class PositionTracker:
                     if self.trailing_stop > self.last_placed_sl_px + (0.1 * self.atr):
                         should_update = True
                         
-                if should_update and not getattr(self, "_is_updating_sl", False):
-                    self._is_updating_sl = True
+                if should_update:
                     asyncio.create_task(self.set_exchange_stop_loss(self.trailing_stop))
 
                 if self.current_price <= self.trailing_stop:
@@ -367,8 +366,7 @@ class PositionTracker:
                     if self.trailing_stop < self.last_placed_sl_px - (0.1 * self.atr):
                         should_update = True
                         
-                if should_update and not getattr(self, "_is_updating_sl", False):
-                    self._is_updating_sl = True
+                if should_update:
                     asyncio.create_task(self.set_exchange_stop_loss(self.trailing_stop))
 
                 if self.current_price >= self.trailing_stop:
