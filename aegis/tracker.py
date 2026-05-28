@@ -69,23 +69,26 @@ class PositionTracker:
         else:
             self.target_tp_fraction = self.target_tp_ratio
             
+        # Eşik 2 = Eşik 1 fiyatı + sabit %0.10 (entry üzerinden)
+        # Böylece Eşik 1 nerede belirlense Eşik 2 her zaman 0.10% üstünde olur.
+        ESIK2_FIXED_INCREMENT = 0.0010  # %0.10 sabit artış
+
         # Calculate Eşik targets
         if self.side == "long":
             self.tp1_target = self.entry_price * (1.0 + self.target_tp_fraction * self.esik1_fraction)
-            self.tp2_target = self.entry_price * (1.0 + self.target_tp_fraction)
+            self.tp2_target = self.entry_price * (1.0 + self.target_tp_fraction * self.esik1_fraction + ESIK2_FIXED_INCREMENT)
             self.breakeven_px = self.entry_price
         else:
             self.tp1_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction)
-            self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction)
+            self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction - ESIK2_FIXED_INCREMENT)
             self.breakeven_px = self.entry_price
 
-            
         if self.action_log_cb:
             e1_pct = self.target_tp_ratio * self.esik1_fraction
-            e2_pct = self.target_tp_ratio
+            e2_pct = self.target_tp_ratio * self.esik1_fraction + 0.10  # Eşik1 + 0.10% sabit
             symbol = self.inst_id.replace("-SWAP", "")
             esik1_percent_str = f"{int(self.esik1_fraction * 100)}"
-            self.action_log_cb(f"🛰️ [{symbol}] Yeni pozisyon yakalandı! | Yön: {self.side.upper()} | Kaldıraç: {self.lever}x | Skynet Hedefi: %{self.target_tp_ratio:.2f} | Eşik 1 (%{esik1_percent_str}): ${self.tp1_target:.6f} | Eşik 2 (%100): ${self.tp2_target:.6f}")
+            self.action_log_cb(f"🛰️ [{symbol}] Yeni pozisyon yakalandı! | Yön: {self.side.upper()} | Kaldıraç: {self.lever}x | Skynet Hedefi: %{self.target_tp_ratio:.2f} | Eşik 1 (%{esik1_percent_str}): ${self.tp1_target:.6f} | Eşik 2 (Eşik1+%0.10): ${self.tp2_target:.6f}")
             
         logger.info(f"Initialized PositionTracker for {self.inst_id} ({self.side.upper()}): "
                     f"Size={self.size}, Entry={self.entry_price}, TP1_Target={self.tp1_target:.6f}, "
@@ -135,14 +138,15 @@ class PositionTracker:
             else:
                 self.target_tp_fraction = self.target_tp_ratio
                 
+            ESIK2_FIXED_INCREMENT = 0.0010  # %0.10 sabit artış
             if self.side == "long":
                 self.tp1_target = self.entry_price * (1.0 + self.target_tp_fraction * self.esik1_fraction)
-                self.tp2_target = self.entry_price * (1.0 + self.target_tp_fraction)
+                self.tp2_target = self.entry_price * (1.0 + self.target_tp_fraction * self.esik1_fraction + ESIK2_FIXED_INCREMENT)
             else:
                 self.tp1_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction)
-                self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction)
+                self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction - ESIK2_FIXED_INCREMENT)
                 
-            logger.info(f"[{self.inst_id}] Targets dynamically updated! New TP: {self.target_tp_ratio}, Eşik1: {self.esik1_fraction}, TP1: {self.tp1_target:.6f}, TP2: {self.tp2_target:.6f}")
+            logger.info(f"[{self.inst_id}] Targets dynamically updated! New TP: {self.target_tp_ratio}, Eşik1: {self.esik1_fraction}, TP1: {self.tp1_target:.6f}, TP2 (Eşik1+%0.10): {self.tp2_target:.6f}")
 
 
     def _log_trade(self, action_event: str, exit_price: float, note: str):
