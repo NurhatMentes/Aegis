@@ -350,7 +350,267 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         # tp1_target = 60000 * (1 + 0.00024 * 0.50) = 60007.2
         self.assertAlmostEqual(tracker.tp1_target, 60007.2)
 
+    # ============ SMART BREAKEVEN TESTS ============
+
+    async def test_smart_breakeven_long_above_015(self):
+        """LONG: Eşik 1 TP > %0.15 → breakeven = entry + %0.09"""
+        exchange = MockExchange()
+        tracker = PositionTracker(
+            inst_id="BTC-USDT-SWAP",
+            side="long",
+            size=10.0,
+            entry_price=60000.0,
+            target_tp_ratio=0.40,  # 0.40%
+            atr=100.0,
+            ct_val=0.01,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="long",
+            esik1_fraction=0.50  # Eşik1 TP = 0.40 * 0.50 = 0.20% > 0.15%
+        )
+        # Eşik1 TP oranı = 0.004 * 0.50 = 0.0020 (= %0.20) > %0.15
+        # breakeven = 60000 * (1 + 0.0009) = 60054
+        expected_be = 60000.0 * (1.0 + 0.0009)
+        self.assertAlmostEqual(tracker.breakeven_px, expected_be)
+        self.assertGreater(tracker.breakeven_px, tracker.entry_price)
+
+    async def test_smart_breakeven_long_below_015(self):
+        """LONG: Eşik 1 TP ≤ %0.15 → breakeven = exact entry"""
+        exchange = MockExchange()
+        tracker = PositionTracker(
+            inst_id="BTC-USDT-SWAP",
+            side="long",
+            size=10.0,
+            entry_price=60000.0,
+            target_tp_ratio=0.20,  # 0.20%
+            atr=100.0,
+            ct_val=0.01,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="long",
+            esik1_fraction=0.50  # Eşik1 TP = 0.20 * 0.50 = 0.10% < 0.15%
+        )
+        # Eşik1 TP oranı = 0.002 * 0.50 = 0.0010 (= %0.10) ≤ %0.15
+        # breakeven = exact entry
+        self.assertAlmostEqual(tracker.breakeven_px, 60000.0)
+
+    async def test_smart_breakeven_short_above_015(self):
+        """SHORT: Eşik 1 TP > %0.15 → breakeven = entry - %0.09"""
+        exchange = MockExchange()
+        tracker = PositionTracker(
+            inst_id="BTC-USDT-SWAP",
+            side="short",
+            size=10.0,
+            entry_price=60000.0,
+            target_tp_ratio=0.40,  # 0.40%
+            atr=100.0,
+            ct_val=0.01,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="short",
+            esik1_fraction=0.50  # Eşik1 TP = 0.40 * 0.50 = 0.20% > 0.15%
+        )
+        # breakeven = 60000 * (1 - 0.0009) = 59946
+        expected_be = 60000.0 * (1.0 - 0.0009)
+        self.assertAlmostEqual(tracker.breakeven_px, expected_be)
+        self.assertLess(tracker.breakeven_px, tracker.entry_price)
+
+    async def test_smart_breakeven_short_below_015(self):
+        """SHORT: Eşik 1 TP ≤ %0.15 → breakeven = exact entry"""
+        exchange = MockExchange()
+        tracker = PositionTracker(
+            inst_id="BTC-USDT-SWAP",
+            side="short",
+            size=10.0,
+            entry_price=60000.0,
+            target_tp_ratio=0.20,  # 0.20%
+            atr=100.0,
+            ct_val=0.01,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="short",
+            esik1_fraction=0.50  # Eşik1 TP = 0.20 * 0.50 = 0.10% ≤ 0.15%
+        )
+        self.assertAlmostEqual(tracker.breakeven_px, 60000.0)
+
+    async def test_smart_breakeven_exact_boundary(self):
+        """Eşik 1 TP = tam %0.15 → breakeven = exact entry (sınır dahil değil, > 0.15 olmalı)"""
+        exchange = MockExchange()
+        tracker = PositionTracker(
+            inst_id="BTC-USDT-SWAP",
+            side="long",
+            size=10.0,
+            entry_price=60000.0,
+            target_tp_ratio=0.30,  # 0.30%
+            atr=100.0,
+            ct_val=0.01,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="long",
+            esik1_fraction=0.50  # Eşik1 TP = 0.30 * 0.50 = 0.15% = sınır
+        )
+        # 0.003 * 0.50 = 0.0015 = %0.15 → NOT > 0.15, so exact entry
+        self.assertAlmostEqual(tracker.breakeven_px, 60000.0)
+
+    async def test_smart_breakeven_update_targets(self):
+        """update_targets ile TP oranı değişince breakeven da güncellenir"""
+        exchange = MockExchange()
+        tracker = PositionTracker(
+            inst_id="BTC-USDT-SWAP",
+            side="long",
+            size=10.0,
+            entry_price=60000.0,
+            target_tp_ratio=0.20,  # 0.20% → Eşik1 = 0.10% < 0.15%
+            atr=100.0,
+            ct_val=0.01,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="long",
+            esik1_fraction=0.50
+        )
+        # Initially exact entry
+        self.assertAlmostEqual(tracker.breakeven_px, 60000.0)
+        
+        # Update to higher ratio: 0.40% → Eşik1 = 0.20% > 0.15%
+        tracker.update_targets(0.40, new_esik1_fraction=0.50)
+        expected_be = 60000.0 * (1.0 + 0.0009)
+        self.assertAlmostEqual(tracker.breakeven_px, expected_be)
+
+    async def test_smart_breakeven_sl_placement_on_exchange(self):
+        """TP1 sonrası borsaya kurulan SL, smart breakeven fiyatını kullanır"""
+        exchange = MockExchange()
+        tracker = PositionTracker(
+            inst_id="SOL-USDT-SWAP",
+            side="long",
+            size=100.0,
+            entry_price=80.0,
+            target_tp_ratio=0.40,  # 0.40% → Eşik1 = 0.20% > 0.15%
+            atr=0.5,
+            ct_val=1.0,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="long",
+            esik1_fraction=0.50
+        )
+        
+        expected_be = 80.0 * (1.0 + 0.0009)  # 80.072
+        self.assertAlmostEqual(tracker.breakeven_px, expected_be)
+        
+        # Execute TP1
+        await tracker.execute_smart_exit(size_pct=0.30, price=80.2, label="TP1")
+        await asyncio.sleep(0.01)
+        
+        self.assertEqual(tracker.state, "RISK_ZERO")
+        # SL on exchange should be at smart breakeven, NOT exact entry
+        placed_sl = [o for o in exchange.placed_orders if o.get("ord_type") == "conditional"]
+        self.assertEqual(len(placed_sl), 1)
+        self.assertAlmostEqual(float(placed_sl[0]["sl_trigger_px"]), expected_be, places=1)
+
+    # ============ TRAILING STOP FULL FLOW TEST ============
+
+    async def test_trailing_stop_full_flow_long(self):
+        """Eşik2 sonrası TRAILING → exchange'e move_order_stop yerleştirilir → güncellenir → tetiklenir"""
+        exchange = MockExchange()
+        tracker = PositionTracker(
+            inst_id="SOL-USDT-SWAP",
+            side="long",
+            size=70.0,
+            entry_price=80.0,
+            target_tp_ratio=0.40,
+            atr=0.5,
+            ct_val=1.0,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="long",
+            esik1_fraction=0.50
+        )
+        
+        # Simulate already at RISK_ZERO after TP1
+        tracker.state = "RISK_ZERO"
+        tracker.algo_sl_id = "existing_sl_123"
+        
+        # Trigger Eşik 2: TP2 ≈ 80 * (1 + 0.002 + 0.001) = 80.24
+        # Price goes above TP2 with bullish momentum
+        tracker.update_tick(80.30, volume_ratio=2.5, ob_imbalance=0.30)
+        await asyncio.sleep(0.01)
+        
+        # Should be in TRAILING
+        self.assertEqual(tracker.state, "TRAILING")
+        self.assertFalse(tracker.is_locked)
+        
+        # Old SL should be cancelled
+        cancelled = [c for c in exchange.cancelled_orders if c.get("algo_id") == "existing_sl_123"]
+        self.assertEqual(len(cancelled), 1)
+        
+        # New native trailing stop should be placed
+        placed_ts = [o for o in exchange.placed_orders if o.get("ord_type") == "move_order_stop"]
+        self.assertEqual(len(placed_ts), 1)
+        # OB imbalance > 0.15 → multiplier = 1.5 → spread = 1.5 * 0.5 = 0.75
+        self.assertAlmostEqual(float(placed_ts[0]["callback_spread"]), 0.75, places=1)
+        self.assertAlmostEqual(float(placed_ts[0]["active_px"]), 80.30, places=1)
+
+    async def test_trailing_stop_full_flow_short(self):
+        """SHORT: Eşik2 sonrası TRAILING → move_order_stop → güncellenir → tetiklenir"""
+        exchange = MockExchange()
+        tracker = PositionTracker(
+            inst_id="SOL-USDT-SWAP",
+            side="short",
+            size=70.0,
+            entry_price=80.0,
+            target_tp_ratio=0.40,
+            atr=0.5,
+            ct_val=1.0,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="short",
+            esik1_fraction=0.50
+        )
+        
+        # Simulate already at RISK_ZERO after TP1
+        tracker.state = "RISK_ZERO"
+        tracker.algo_sl_id = "existing_sl_456"
+        
+        # Trigger Eşik 2: TP2 ≈ 80 * (1 - 0.002 - 0.001) = 79.76
+        # Price goes below TP2 with bearish momentum
+        tracker.update_tick(79.70, volume_ratio=2.5, ob_imbalance=-0.30)
+        await asyncio.sleep(0.01)
+        
+        # Should be in TRAILING
+        self.assertEqual(tracker.state, "TRAILING")
+        self.assertFalse(tracker.is_locked)
+        
+        # Old SL should be cancelled
+        cancelled = [c for c in exchange.cancelled_orders if c.get("algo_id") == "existing_sl_456"]
+        self.assertEqual(len(cancelled), 1)
+        
+        # New trailing stop placed
+        placed_ts = [o for o in exchange.placed_orders if o.get("ord_type") == "move_order_stop"]
+        self.assertEqual(len(placed_ts), 1)
+        # OB imbalance < -0.15 → multiplier = 1.5 → spread = 1.5 * 0.5 = 0.75
+        self.assertAlmostEqual(float(placed_ts[0]["callback_spread"]), 0.75, places=1)
+
+    # ============ NO OCO/TP FUNCTIONS EXIST TEST ============
+
+    async def test_no_oco_or_tp_functions(self):
+        """set_exchange_oco_order ve set_exchange_take_profit artık mevcut değil"""
+        exchange = MockExchange()
+        tracker = PositionTracker(
+            inst_id="BTC-USDT-SWAP",
+            side="long",
+            size=10.0,
+            entry_price=60000.0,
+            target_tp_ratio=0.40,
+            atr=100.0,
+            ct_val=0.01,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="long",
+            esik1_fraction=0.50
+        )
+        self.assertFalse(hasattr(tracker, "set_exchange_oco_order"))
+        self.assertFalse(hasattr(tracker, "set_exchange_take_profit"))
+        self.assertFalse(hasattr(tracker, "cancel_exchange_take_profit"))
+
 
 if __name__ == "__main__":
     unittest.main()
-

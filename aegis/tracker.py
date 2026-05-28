@@ -76,10 +76,19 @@ class PositionTracker:
         if self.side == "long":
             self.tp1_target = self.entry_price * (1.0 + self.target_tp_fraction * self.esik1_fraction)
             self.tp2_target = self.entry_price * (1.0 + self.target_tp_fraction * self.esik1_fraction + ESIK2_FIXED_INCREMENT)
-            self.breakeven_px = self.entry_price
         else:
             self.tp1_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction)
             self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction - ESIK2_FIXED_INCREMENT)
+
+        # Smart Breakeven: Eşik 1 TP oranı %0.15'ten yüksekse, SL'yi girişin %0.09 üstüne kur
+        # Böylece komisyon dahil küçük bir kâr garanti altına alınır.
+        esik1_tp_pct = self.target_tp_fraction * self.esik1_fraction  # örn: 0.00175
+        if esik1_tp_pct > 0.0015:  # > %0.15
+            if self.side == "long":
+                self.breakeven_px = self.entry_price * (1.0 + 0.0009)
+            else:
+                self.breakeven_px = self.entry_price * (1.0 - 0.0009)
+        else:
             self.breakeven_px = self.entry_price
 
         if self.action_log_cb:
@@ -145,8 +154,18 @@ class PositionTracker:
             else:
                 self.tp1_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction)
                 self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction - ESIK2_FIXED_INCREMENT)
+
+            # Smart Breakeven güncelle
+            esik1_tp_pct = self.target_tp_fraction * self.esik1_fraction
+            if esik1_tp_pct > 0.0015:  # > %0.15
+                if self.side == "long":
+                    self.breakeven_px = self.entry_price * (1.0 + 0.0009)
+                else:
+                    self.breakeven_px = self.entry_price * (1.0 - 0.0009)
+            else:
+                self.breakeven_px = self.entry_price
                 
-            logger.info(f"[{self.inst_id}] Targets dynamically updated! New TP: {self.target_tp_ratio}, Eşik1: {self.esik1_fraction}, TP1: {self.tp1_target:.6f}, TP2 (Eşik1+%0.10): {self.tp2_target:.6f}")
+            logger.info(f"[{self.inst_id}] Targets dynamically updated! New TP: {self.target_tp_ratio}, Eşik1: {self.esik1_fraction}, TP1: {self.tp1_target:.6f}, TP2 (Eşik1+%0.10): {self.tp2_target:.6f}, BE: {self.breakeven_px:.6f}")
 
 
     def _log_trade(self, action_event: str, exit_price: float, note: str):
@@ -647,7 +666,8 @@ class PositionTracker:
                     self.state = "RISK_ZERO"
                     if self.action_log_cb:
                         symbol = self.inst_id.replace("-SWAP", "")
-                        self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış onaylandı. [{self.side.upper()} - {self.lever}x] Stop-Loss noktası komisyonlar dahil BAŞA BAŞ seviyesine kilitlendi. Eşik 2 takipçi stop için bekleniyor. Durum: RISK_ZERO (Risk Sıfır!).")
+                        be_label = f"girişin %0.09 üstü (${self.breakeven_px:.6f})" if self.breakeven_px != self.entry_price else f"BAŞA BAŞ (${self.breakeven_px:.6f})"
+                        self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış onaylandı. [{self.side.upper()} - {self.lever}x] Stop-Loss noktası {be_label} seviyesine kilitlendi. Eşik 2 takipçi stop için bekleniyor. Durum: RISK_ZERO (Risk Sıfır!).")
                         
                     self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=price, note="30% Kısmi Kâr Alma")
                     # Sadece başa baş SL — borsaya TP emri VERİLMEZ.
@@ -777,114 +797,7 @@ class PositionTracker:
         finally:
             self._is_updating_sl = False
 
-    async def set_exchange_take_profit(self, trigger_px: float):
-        """Places or updates a take-profit algo order on the exchange for the remaining size."""
-        try:
-            # 1. Cancel existing take profit if any
-            if getattr(self, "algo_tp_id", None):
-                logger.info(f"[{self.inst_id}] Cancelling existing exchange take profit order {self.algo_tp_id}...")
-                await self.exchange.cancel_algo_order(self.inst_id, self.algo_tp_id)
-                self.algo_tp_id = None
 
-            # Get instrument info for precision
-            inst_info = self.exchange.get_instrument_info(self.inst_id)
-            tick_sz = float(inst_info.get("tickSz", "0.01"))
-            
-            # Format trigger price
-            rounded_trigger = round(trigger_px / tick_sz) * tick_sz
-            px_str = f"{rounded_trigger:.8f}".rstrip("0").rstrip(".")
-            sz_str = f"{self.size:.8f}".rstrip("0").rstrip(".")
-            
-            close_side = "sell" if self.side == "long" else "buy"
-            
-            logger.info(f"[{self.inst_id}] Placing new exchange Take-Profit at {px_str} for size {sz_str}...")
-            res = await self.exchange.place_algo_order(
-                inst_id=self.inst_id,
-                side=close_side,
-                ord_type="conditional",
-                sz=sz_str,
-                pos_side=self.pos_side,
-                mgn_mode=self.mgn_mode,
-                tp_trigger_px=px_str,
-                tp_ord_px="-1"
-            )
-            
-            if res and res.get("code") == "0" and "data" in res:
-                self.algo_tp_id = res["data"][0]["algoId"]
-                self.last_placed_tp_px = trigger_px
-                logger.info(f"[{self.inst_id}] Exchange Take-Profit placed successfully. AlgoId: {self.algo_tp_id}, Price: {self.last_placed_tp_px}")
-            else:
-                err_msg = res.get("msg", "Unknown error") if res else "No response"
-                logger.error(f"[{self.inst_id}] Failed to place exchange Take-Profit: {err_msg}")
-        except Exception as e:
-            logger.exception(f"[{self.inst_id}] Exception in set_exchange_take_profit: {e}")
-
-    async def set_exchange_oco_order(self, tp_trigger_px: float, sl_trigger_px: float):
-        """Places a combined OCO (Take-Profit + Stop-Loss) order on the exchange."""
-        try:
-            # 1. Cancel existing algo orders if any
-            if getattr(self, "algo_sl_id", None) and self.algo_sl_id != self.algo_tp_id:
-                await self.exchange.cancel_algo_order(self.inst_id, self.algo_sl_id)
-                self.algo_sl_id = None
-            if getattr(self, "algo_tp_id", None):
-                await self.exchange.cancel_algo_order(self.inst_id, self.algo_tp_id)
-                self.algo_tp_id = None
-
-            # Get instrument info for precision
-            inst_info = self.exchange.get_instrument_info(self.inst_id)
-            tick_sz = float(inst_info.get("tickSz", "0.01"))
-            
-            # Format trigger prices
-            rounded_tp = round(tp_trigger_px / tick_sz) * tick_sz
-            tp_str = f"{rounded_tp:.8f}".rstrip("0").rstrip(".")
-            
-            rounded_sl = round(sl_trigger_px / tick_sz) * tick_sz
-            sl_str = f"{rounded_sl:.8f}".rstrip("0").rstrip(".")
-            
-            sz_str = f"{self.size:.8f}".rstrip("0").rstrip(".")
-            
-            close_side = "sell" if self.side == "long" else "buy"
-            
-            logger.info(f"[{self.inst_id}] Placing new OCO order (TP: {tp_str}, SL: {sl_str}) for size {sz_str}...")
-            res = await self.exchange.place_algo_order(
-                inst_id=self.inst_id,
-                side=close_side,
-                ord_type="oco",
-                sz=sz_str,
-                pos_side=self.pos_side,
-                mgn_mode=self.mgn_mode,
-                tp_trigger_px=tp_str,
-                tp_ord_px="-1",
-                sl_trigger_px=sl_str,
-                sl_ord_px="-1"
-            )
-            
-            if res and res.get("code") == "0" and "data" in res:
-                algo_id = res["data"][0]["algoId"]
-                self.algo_tp_id = algo_id
-                self.algo_sl_id = algo_id
-                self.last_placed_tp_px = tp_trigger_px
-                self.last_placed_sl_px = sl_trigger_px
-                logger.info(f"[{self.inst_id}] Exchange OCO order placed successfully. AlgoId: {algo_id}")
-            else:
-                err_msg = res.get("msg", "Unknown error") if res else "No response"
-                logger.error(f"[{self.inst_id}] Failed to place exchange OCO order: {err_msg}")
-        except Exception as e:
-            logger.exception(f"[{self.inst_id}] Exception in set_exchange_oco_order: {e}")
-
-    async def cancel_exchange_take_profit(self):
-        """Cancels the Take-Profit algo order on the exchange if it exists.
-        Also clears algo_sl_id when both point to the same OCO order."""
-        try:
-            if getattr(self, "algo_tp_id", None):
-                logger.info(f"[{self.inst_id}] Cancelling exchange take profit order {self.algo_tp_id}...")
-                await self.exchange.cancel_algo_order(self.inst_id, self.algo_tp_id)
-                # If both IDs pointed to the same OCO order, clear both
-                if self.algo_sl_id == self.algo_tp_id:
-                    self.algo_sl_id = None
-                self.algo_tp_id = None
-        except Exception as e:
-            logger.exception(f"[{self.inst_id}] Exception in cancel_exchange_take_profit: {e}")
 
     async def _transition_to_trailing_stop(self, trailing_px: float):
         """Atomically cancels the existing OCO/TP/SL order and places a new trailing stop.
