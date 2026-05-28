@@ -426,12 +426,12 @@ class PositionTracker:
                     symbol = self.inst_id.replace("-SWAP", "")
                     self.action_log_cb(
                         f"🛡️ [{symbol}] Pozisyon lot boyutu nedeniyle bölünemedi. "
-                        f"Direkt RISK_ZERO moduna geçildi. Başa Baş SL + Eşik 2 TP OCO emri kuruluyor..."
+                        f"Direkt RISK_ZERO moduna geçildi. Başa Baş SL kuruluyor, Eşik 2 takipçi stop için bekleniyor."
                     )
-                asyncio.create_task(self.set_exchange_oco_order(
-                    tp_trigger_px=self.tp2_target,
-                    sl_trigger_px=self.breakeven_px
-                ))
+                # Sadece başa baş SL koy — Eşik 2 TP'si borsaya verilmez.
+                # TP emri olsaydı fiyat Eşik 2'ye gelince borsa pozisyonu kapatırdı,
+                # tracker TRAILING'e geçemezdi.
+                asyncio.create_task(self.set_exchange_stop_loss(self.breakeven_px))
                 logger.info(f"[{self.inst_id}] State transitioned to RISK_ZERO (no-split path)")
                 return  # finally block releases lock
 
@@ -529,11 +529,9 @@ class PositionTracker:
                         self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=self.current_price, note="30% Kısmi Kâr Alma (Market Emir)")
                         if self.action_log_cb:
                             symbol = self.inst_id.replace("-SWAP", "")
-                            self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış (market) onaylandı. Başa Baş + Eşik 2 OCO emri kuruluyor...")
-                        asyncio.create_task(self.set_exchange_oco_order(
-                            tp_trigger_px=self.tp2_target,
-                            sl_trigger_px=self.breakeven_px
-                        ))
+                            self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış (market) onaylandı. Başa Baş SL kuruluyor, Eşik 2 izleniyor...")
+                        # Sadece başa baş SL — borsaya TP emri verilmez, Eşik 2 tracker tarafından izlenir
+                        asyncio.create_task(self.set_exchange_stop_loss(self.breakeven_px))
                 else:
                     self.state = "CLOSED"
                     self._log_trade(action_event=label, exit_price=self.current_price, note="Pozisyon Tamamen Kapatıldı")
@@ -630,14 +628,13 @@ class PositionTracker:
                     self.state = "RISK_ZERO"
                     if self.action_log_cb:
                         symbol = self.inst_id.replace("-SWAP", "")
-                        self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış onaylandı. [{self.side.upper()} - {self.lever}x] Stop-Loss noktası komisyonlar dahil BAŞA BAŞ seviyesine kilitlendi. Durum: RISK_ZERO (Risk Sıfır!).")
+                        self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış onaylandı. [{self.side.upper()} - {self.lever}x] Stop-Loss noktası komisyonlar dahil BAŞA BAŞ seviyesine kilitlendi. Eşik 2 takipçi stop için bekleniyor. Durum: RISK_ZERO (Risk Sıfır!).")
                         
                     self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=price, note="30% Kısmi Kâr Alma")
-                    # Place BreakEven Stop Loss AND Eşik 2 Take Profit as a single OCO order
-                    asyncio.create_task(self.set_exchange_oco_order(
-                        tp_trigger_px=self.tp2_target,
-                        sl_trigger_px=self.breakeven_px
-                    ))
+                    # Sadece başa baş SL — borsaya TP emri VERİLMEZ.
+                    # Eşik 2 update_tick() tarafından izlenir; oraya gelince SL iptal + trailing stop kurulur.
+                    # OCO/TP emri olsaydı borsa Eşik 2'de pozisyonu kapatır, tracker TRAILING'e geçemezdi.
+                    asyncio.create_task(self.set_exchange_stop_loss(self.breakeven_px))
 
             else:  # TP2_EXIT, TRAILING_EXIT, or BE_EXIT
                 self.state = "CLOSED"
