@@ -394,6 +394,11 @@ class PositionTracker:
             await self.exchange.cancel_algo_orders(self.inst_id)
             self.algo_sl_id = None
             self.algo_tp_id = None
+            
+            if getattr(self, "size", 0.0) <= 0:
+                logger.warning(f"[{self.inst_id}] Position size is already 0 (probably hit an exchange TP/SL exactly now). Aborting smart exit.")
+                self.is_locked = False
+                return
             # 1. Round/Format order size
             # Order size is size * size_pct. Let's get instrument info from exchange
             inst_info = self.exchange.get_instrument_info(self.inst_id)
