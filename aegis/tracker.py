@@ -1,6 +1,7 @@
 import asyncio
 import uuid
 import logging
+import time
 from config import get_coin_profile, safe_float
 
 logger = logging.getLogger("Aegis.Tracker")
@@ -48,6 +49,7 @@ class PositionTracker:
         self.algo_sl_id = None
         self.last_placed_sl_px = None
         self.last_placed_spread = None
+        self.last_ts_update_time = 0.0
         self.algo_tp_id = None
         self.last_placed_tp_px = None
         self.squeeze_defense_active = False
@@ -63,12 +65,8 @@ class PositionTracker:
         self.ob_imbalance = 0.0
         self.ob_multiplier = 1.0
         
-        # Convert target_tp_ratio to decimal fraction.
-        # If target_tp_ratio > 0.05, we treat it as a percentage (e.g. 0.35 means 0.0035 fraction)
-        if self.target_tp_ratio > 0.05:
-            self.target_tp_fraction = self.target_tp_ratio / 100.0
-        else:
-            self.target_tp_fraction = self.target_tp_ratio
+        # Convert target_tp_ratio to decimal fraction (always treat it as a percentage).
+        self.target_tp_fraction = self.target_tp_ratio / 100.0
             
         # Eşik 2 = Eşik 1 fiyatı + sabit %0.10 (entry üzerinden)
         # Böylece Eşik 1 nerede belirlense Eşik 2 her zaman 0.10% üstünde olur.
@@ -138,10 +136,7 @@ class PositionTracker:
         if abs(self.target_tp_ratio - new_tp_ratio) > 0.0001 or abs(getattr(self, "esik1_fraction", 0.50) - new_esik1_fraction) > 0.0001:
             self.target_tp_ratio = float(new_tp_ratio)
             self.esik1_fraction = float(new_esik1_fraction)
-            if self.target_tp_ratio > 0.05:
-                self.target_tp_fraction = self.target_tp_ratio / 100.0
-            else:
-                self.target_tp_fraction = self.target_tp_ratio
+            self.target_tp_fraction = self.target_tp_ratio / 100.0
                 
             ESIK2_FIXED_INCREMENT = 0.0010  # %0.10 sabit artış
             if self.side == "long":
@@ -324,12 +319,17 @@ class PositionTracker:
                 
                 # Check if we should update exchange trailing stop order
                 target_spread = self.ob_multiplier * self.atr
+                now = time.time()
                 should_update = False
                 if not getattr(self, "last_placed_spread", None):
                     should_update = True
                 else:
-                    if abs(self.last_placed_spread - target_spread) > (0.1 * self.atr):
-                        should_update = True
+                    is_tighter = target_spread < (self.last_placed_spread - 0.1 * self.atr)
+                    if is_tighter:
+                        is_squeeze = (self.ob_multiplier == 0.4)
+                        time_passed = (now - getattr(self, "last_ts_update_time", 0.0)) >= 15.0
+                        if is_squeeze or time_passed:
+                            should_update = True
                         
                 if should_update:
                     self.last_placed_spread = target_spread
@@ -364,12 +364,17 @@ class PositionTracker:
 
                 # Check if we should update exchange trailing stop order
                 target_spread = self.ob_multiplier * self.atr
+                now = time.time()
                 should_update = False
                 if not getattr(self, "last_placed_spread", None):
                     should_update = True
                 else:
-                    if abs(self.last_placed_spread - target_spread) > (0.1 * self.atr):
-                        should_update = True
+                    is_tighter = target_spread < (self.last_placed_spread - 0.1 * self.atr)
+                    if is_tighter:
+                        is_squeeze = (self.ob_multiplier == 0.4)
+                        time_passed = (now - getattr(self, "last_ts_update_time", 0.0)) >= 15.0
+                        if is_squeeze or time_passed:
+                            should_update = True
                         
                 if should_update:
                     self.last_placed_spread = target_spread
@@ -762,6 +767,7 @@ class PositionTracker:
             if res and res.get("code") == "0" and "data" in res:
                 self.algo_sl_id = res["data"][0]["algoId"]
                 self.last_placed_spread = callback_spread
+                self.last_ts_update_time = time.time()
                 logger.info(f"[{self.inst_id}] Exchange native Trailing Stop placed successfully. AlgoId: {self.algo_sl_id}, Spread: {spread_str}")
             else:
                 err_msg = res.get("msg", "Unknown error") if res else "No response"

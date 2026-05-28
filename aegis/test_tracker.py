@@ -219,6 +219,7 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         exchange.placed_orders = []
         exchange.cancelled_orders = []
         
+        tracker.last_ts_update_time = 0.0
         tracker.update_tick(60400.0, volume_ratio=1.0, ob_imbalance=0.0)
         await asyncio.sleep(0.01)
         self.assertEqual(tracker.trailing_stop, 60300.0)
@@ -231,7 +232,123 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(placed_algo), 1)
         self.assertAlmostEqual(float(placed_algo[0]["callback_spread"]), 100.0)
 
+    async def test_short_fsm_execution_and_trailing(self):
+        # Initialize mock exchange
+        exchange = MockExchange()
+        
+        tracker = PositionTracker(
+            inst_id="BTC-USDT-SWAP",
+            side="short",
+            size=10.0,
+            entry_price=60000.0,
+            target_tp_ratio=0.40,  # 0.40%
+            atr=100.0,
+            ct_val=0.01,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="short",
+            esik1_fraction=0.40
+        )
+        
+        # Verify initial calculations
+        self.assertEqual(tracker.state, "INIT")
+        # TP1 target = 60000 * (1 - 0.004 * 0.40) = 60000 * 0.9984 = 59904
+        self.assertAlmostEqual(tracker.tp1_target, 59904.0)
+        # TP2 target = 60000 * (1 - 0.004 * 0.40 - 0.001) = 60000 * 0.9974 = 59844
+        self.assertAlmostEqual(tracker.tp2_target, 59844.0)
 
+        # 1. Update price above TP1 target
+        tracker.update_tick(60050.0, volume_ratio=1.0, ob_imbalance=0.0)
+        self.assertEqual(tracker.state, "INIT")
+        self.assertFalse(tracker.is_locked)
+
+        # 2. Update price below TP1 target -> Should trigger TP1 exit task
+        tracker.execute_smart_exit = AsyncMock()
+        tracker.update_tick(59900.0, volume_ratio=1.0, ob_imbalance=0.0)
+        
+        # Must lock and spawn task
+        self.assertTrue(tracker.is_locked)
+        tracker.execute_smart_exit.assert_called_once()
+        args, kwargs = tracker.execute_smart_exit.call_args
+        self.assertAlmostEqual(kwargs.get("price"), 59850.0)
+        self.assertEqual(kwargs.get("size_pct"), 0.30)
+        self.assertEqual(kwargs.get("label"), "TP1")
+
+        # 3. Simulate completion of TP1 exit
+        tracker.is_locked = False
+        tracker.state = "RISK_ZERO"
+        tracker.size = 7.0
+
+        # 4. Update price above TP2 (TP2 is 59844)
+        tracker.update_tick(59880.0, volume_ratio=1.0, ob_imbalance=0.0)
+        self.assertEqual(tracker.state, "RISK_ZERO")
+        self.assertFalse(tracker.is_locked)
+
+        # 5. Update price below TP2 -> Should transition to TRAILING state immediately
+        tracker.update_tick(59800.0, volume_ratio=2.5, ob_imbalance=-0.30)
+        await asyncio.sleep(0.01)
+        
+        self.assertEqual(tracker.state, "TRAILING")
+        self.assertFalse(tracker.is_locked)
+        self.assertEqual(tracker.lowest_price, 59800.0)
+        # Trailing stop: 59800 + (1.5 * 100) = 59950
+        self.assertEqual(tracker.trailing_stop, 59950.0)
+        self.assertEqual(tracker.last_placed_spread, 150.0)
+        
+        # Check that trailing stop was placed on mock exchange
+        placed_algo = [o for o in exchange.placed_orders if o.get("ord_type") == "move_order_stop"]
+        self.assertEqual(len(placed_algo), 1)
+        self.assertAlmostEqual(float(placed_algo[0]["callback_spread"]), 150.0)
+
+        # 6. Price goes lower -> Trailing stop moves down
+        tracker.update_tick(59600.0, volume_ratio=1.0, ob_imbalance=0.0)
+        self.assertEqual(tracker.lowest_price, 59600.0)
+        self.assertEqual(tracker.trailing_stop, 59700.0)
+        
+        # Spread changed from 150 to 100.
+        # Reset last_ts_update_time to bypass 15s cooldown
+        tracker.last_ts_update_time = 0.0
+        exchange.placed_orders = []
+        exchange.cancelled_orders = []
+        
+        tracker.update_tick(59500.0, volume_ratio=1.0, ob_imbalance=0.0)
+        await asyncio.sleep(0.01)
+        self.assertEqual(tracker.lowest_price, 59500.0)
+        self.assertEqual(tracker.trailing_stop, 59600.0)
+        self.assertEqual(tracker.last_placed_spread, 100.0)
+        
+        placed_algo = [o for o in exchange.placed_orders if o.get("ord_type") == "move_order_stop"]
+        self.assertEqual(len(placed_algo), 1)
+        self.assertAlmostEqual(float(placed_algo[0]["callback_spread"]), 100.0)
+
+    async def test_small_tp_ratio_conversion(self):
+        exchange = MockExchange()
+        tracker = PositionTracker(
+            inst_id="BTC-USDT-SWAP",
+            side="long",
+            size=10.0,
+            entry_price=60000.0,
+            target_tp_ratio=0.035,  # 0.035%
+            atr=100.0,
+            ct_val=0.01,
+            exchange_interface=exchange,
+            mgn_mode="isolated",
+            pos_side="long",
+            esik1_fraction=0.50
+        )
+        # 0.035% target_tp_ratio should be divided by 100 -> 0.00035 fraction
+        self.assertAlmostEqual(tracker.target_tp_fraction, 0.00035)
+        # tp1_target = 60000 * (1 + 0.00035 * 0.50) = 60010.5
+        self.assertAlmostEqual(tracker.tp1_target, 60010.5)
+        # tp2_target = 60000 * (1 + 0.00035 * 0.50 + 0.0010) = 60070.5
+        self.assertAlmostEqual(tracker.tp2_target, 60070.5)
+        
+        # Test updating targets dynamically with small ratio
+        tracker.update_targets(0.024, new_esik1_fraction=0.50)
+        # 0.024% should be divided by 100 -> 0.00024 fraction
+        self.assertAlmostEqual(tracker.target_tp_fraction, 0.00024)
+        # tp1_target = 60000 * (1 + 0.00024 * 0.50) = 60007.2
+        self.assertAlmostEqual(tracker.tp1_target, 60007.2)
 
 
 if __name__ == "__main__":

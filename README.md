@@ -6,10 +6,14 @@ It tracks active futures/swap positions via OKX's Private WebSocket, automatical
 
 ## Özellikler (Features)
 - **Gerçek Zamanlı Takip (Real-time Tracking):** OKX Private WebSocket ile açık pozisyonların anlık takibi.
-- **Dinamik Eşik (Dynamic Targets):** Pozisyona girildiği an hedef Kar Al (TP) yüzdesi üzerinden Eşik 1 ve Eşik 2 seviyelerinin belirlenmesi.
-- **Dinamik Trailing Stop (İzleyen Stop):** ATR (Average True Range) verilerini kullanarak volatiliteye göre esnek izleyen stop mesafeleri.
+- **Dinamik Eşik (Dynamic Targets):** Pozisyona girildiği an hedef Kar Al (TP) yüzdesi üzerinden Eşik 1 ve Eşik 2 seviyelerinin belirlenmesi. Küçük TP oranları (%0.05 ve altı) için 100x ölçekleme düzeltmesi entegre edilmiştir.
+- **OKX Native Trailing Stop (Borsa Tarafı İzleyen Stop):** Takipçi stoplar simüle edilmek yerine OKX borsasına doğrudan native `move_order_stop` emri olarak iletilir.
+- **Dinamik ATR Spread ve Daraltma Kuralı:** İzleyen stop mesafesi volatilite (ATR) ve emir defteri dengesine (OB Imbalance) göre anlık ayarlanır. Takipçi stop aralığı sadece daraltılabilir (tightening-only) ve 15 saniyelik güncelleme cooldown'ına tabidir.
+- **Balina Baskısı Kalkanı (Squeeze Wall Defense):** Tahtada ani ve devasa bir karşı yönlü baskı oluştuğunda, 15 saniyelik cooldown yok sayılarak takip mesafesi anında `0.4x ATR` seviyesine daraltılır ve kâr kilitlenir.
+- **Hata Toleransı ve Lot Boyutu Yuvarlama:** Boş/null OKX API yanıtlarına karşı `safe_float` koruması ve kısmi çıkış sonrasında bakiye küsurat kalmasını önleyen lot hassasiyeti yuvarlama mekanizması.
 - **Gelişmiş Kontrol Paneli (UI Dashboard):** Streamlit ile tasarlanmış, anlık PNL, bağlantı durumu ve aktif pozisyon hedeflerini (radar ve lineer barlarla) gösteren şık arayüz.
 - **Canlı Ayar Değişikliği (Hot Reloading):** Motoru durdurmadan Eşik oranlarının UI üzerinden anında değiştirilebilmesi.
+
 
 ---
 
