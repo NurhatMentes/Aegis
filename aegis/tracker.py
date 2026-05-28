@@ -47,6 +47,7 @@ class PositionTracker:
         self.is_locked = False  # Idempotence/lock flag
         self.algo_sl_id = None
         self.last_placed_sl_px = None
+        self.last_placed_spread = None
         self.algo_tp_id = None
         self.last_placed_tp_px = None
         self.squeeze_defense_active = False
@@ -254,6 +255,7 @@ class PositionTracker:
                 # Trailing stop başlangıç noktası: mevcut fiyat
                 # Gap hesabı: calculate_ob_multiplier() zaten ob_imbalance'a göre dinamik
                 initial_mult = self.calculate_ob_multiplier()
+                self.ob_multiplier = initial_mult
                 
                 self.state = "TRAILING"
                 if self.side == "long":
@@ -320,16 +322,18 @@ class PositionTracker:
                     
                 logger.debug(f"[{self.inst_id}] Long Trailing: High={self.highest_price:.6f}, Imb={self.ob_imbalance:.2f}, Mult={self.ob_multiplier}, Stop={self.trailing_stop:.6f}")
                 
-                # Check if we should update exchange stop loss
+                # Check if we should update exchange trailing stop order
+                target_spread = self.ob_multiplier * self.atr
                 should_update = False
-                if not getattr(self, "last_placed_sl_px", None):
+                if not getattr(self, "last_placed_spread", None):
                     should_update = True
                 else:
-                    if self.trailing_stop > self.last_placed_sl_px + (0.1 * self.atr):
+                    if abs(self.last_placed_spread - target_spread) > (0.1 * self.atr):
                         should_update = True
                         
                 if should_update:
-                    asyncio.create_task(self.set_exchange_stop_loss(self.trailing_stop))
+                    self.last_placed_spread = target_spread
+                    asyncio.create_task(self.set_exchange_trailing_stop(callback_spread=target_spread))
 
                 if self.current_price <= self.trailing_stop:
                     self.is_locked = True
@@ -358,16 +362,18 @@ class PositionTracker:
                     
                 logger.debug(f"[{self.inst_id}] Short Trailing: Low={self.lowest_price:.6f}, Imb={self.ob_imbalance:.2f}, Mult={self.ob_multiplier}, Stop={self.trailing_stop:.6f}")
 
-                # Check if we should update exchange stop loss
+                # Check if we should update exchange trailing stop order
+                target_spread = self.ob_multiplier * self.atr
                 should_update = False
-                if not getattr(self, "last_placed_sl_px", None):
+                if not getattr(self, "last_placed_spread", None):
                     should_update = True
                 else:
-                    if self.trailing_stop < self.last_placed_sl_px - (0.1 * self.atr):
+                    if abs(self.last_placed_spread - target_spread) > (0.1 * self.atr):
                         should_update = True
                         
                 if should_update:
-                    asyncio.create_task(self.set_exchange_stop_loss(self.trailing_stop))
+                    self.last_placed_spread = target_spread
+                    asyncio.create_task(self.set_exchange_trailing_stop(callback_spread=target_spread))
 
                 if self.current_price >= self.trailing_stop:
                     self.is_locked = True
@@ -394,11 +400,6 @@ class PositionTracker:
             await self.exchange.cancel_algo_orders(self.inst_id)
             self.algo_sl_id = None
             self.algo_tp_id = None
-            
-            if getattr(self, "size", 0.0) <= 0:
-                logger.warning(f"[{self.inst_id}] Position size is already 0 (probably hit an exchange TP/SL exactly now). Aborting smart exit.")
-                self.is_locked = False
-                return
             # 1. Round/Format order size
             # Order size is size * size_pct. Let's get instrument info from exchange
             inst_info = self.exchange.get_instrument_info(self.inst_id)
@@ -716,6 +717,60 @@ class PositionTracker:
         finally:
             self._is_updating_sl = False
 
+    async def set_exchange_trailing_stop(self, callback_spread: float, active_px: float = None):
+        """Places or updates a native trailing stop (move_order_stop) on the exchange."""
+        if getattr(self, "_is_updating_sl", False):
+            logger.debug(f"[{self.inst_id}] Already updating SL/TS. Skipping concurrent set_exchange_trailing_stop call.")
+            return
+            
+        self._is_updating_sl = True
+        try:
+            # 1. Cancel existing stop loss / trailing stop if any
+            if getattr(self, "algo_sl_id", None):
+                logger.info(f"[{self.inst_id}] Cancelling existing exchange stop order {self.algo_sl_id}...")
+                await self.exchange.cancel_algo_order(self.inst_id, self.algo_sl_id)
+                self.algo_sl_id = None
+
+            # Get instrument info for precision
+            inst_info = self.exchange.get_instrument_info(self.inst_id)
+            tick_sz = float(inst_info.get("tickSz", "0.01"))
+            
+            # Format callback spread
+            rounded_spread = max(tick_sz, round(callback_spread / tick_sz) * tick_sz)
+            spread_str = f"{rounded_spread:.8f}".rstrip("0").rstrip(".")
+            sz_str = f"{self.size:.8f}".rstrip("0").rstrip(".")
+            
+            active_px_str = None
+            if active_px:
+                rounded_active = round(active_px / tick_sz) * tick_sz
+                active_px_str = f"{rounded_active:.8f}".rstrip("0").rstrip(".")
+            
+            close_side = "sell" if self.side == "long" else "buy"
+            
+            logger.info(f"[{self.inst_id}] Placing native Trailing Stop (move_order_stop) with callbackSpread={spread_str} (size {sz_str})...")
+            res = await self.exchange.place_algo_order(
+                inst_id=self.inst_id,
+                side=close_side,
+                ord_type="move_order_stop",
+                sz=sz_str,
+                pos_side=self.pos_side,
+                mgn_mode=self.mgn_mode,
+                callback_spread=spread_str,
+                active_px=active_px_str
+            )
+            
+            if res and res.get("code") == "0" and "data" in res:
+                self.algo_sl_id = res["data"][0]["algoId"]
+                self.last_placed_spread = callback_spread
+                logger.info(f"[{self.inst_id}] Exchange native Trailing Stop placed successfully. AlgoId: {self.algo_sl_id}, Spread: {spread_str}")
+            else:
+                err_msg = res.get("msg", "Unknown error") if res else "No response"
+                logger.error(f"[{self.inst_id}] Failed to place exchange native Trailing Stop: {err_msg}")
+        except Exception as e:
+            logger.exception(f"[{self.inst_id}] Exception in set_exchange_trailing_stop: {e}")
+        finally:
+            self._is_updating_sl = False
+
     async def set_exchange_take_profit(self, trigger_px: float):
         """Places or updates a take-profit algo order on the exchange for the remaining size."""
         try:
@@ -846,8 +901,9 @@ class PositionTracker:
                 logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] No existing OCO/algo order to cancel.")
 
             # Step 2: Place the new trailing stop
-            await self.set_exchange_stop_loss(trailing_px)
-            logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] Trailing stop placed at {trailing_px:.6f}. Ready.")
+            gap_distance = self.ob_multiplier * self.atr
+            await self.set_exchange_trailing_stop(callback_spread=gap_distance, active_px=self.current_price)
+            logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] Native trailing stop placed with spread {gap_distance:.6f} at active_px {self.current_price:.6f}. Ready.")
         except Exception as e:
             logger.exception(f"[{self.inst_id}] Exception in _transition_to_trailing_stop: {e}")
 

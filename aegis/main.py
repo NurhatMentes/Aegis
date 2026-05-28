@@ -203,8 +203,10 @@ class OKXExchange:
     async def place_algo_order(self, inst_id: str, side: str, ord_type: str, sz: str,
                                pos_side: str = None, mgn_mode: str = "isolated",
                                tp_trigger_px: str = None, tp_ord_px: str = "-1",
-                               sl_trigger_px: str = None, sl_ord_px: str = "-1") -> dict:
-        """Places a conditional take-profit/stop-loss algo order to OKX."""
+                               sl_trigger_px: str = None, sl_ord_px: str = "-1",
+                               callback_ratio: str = None, callback_spread: str = None,
+                               active_px: str = None) -> dict:
+        """Places a conditional take-profit/stop-loss or trailing stop algo order to OKX."""
         path = "/api/v5/trade/order-algo"
         body = {
             "instId": inst_id,
@@ -223,6 +225,13 @@ class OKXExchange:
         if sl_trigger_px:
             body["slTriggerPx"] = sl_trigger_px
             body["slOrdPx"] = sl_ord_px
+
+        if callback_ratio:
+            body["callbackRatio"] = callback_ratio
+        if callback_spread:
+            body["callbackSpread"] = callback_spread
+        if active_px:
+            body["activePx"] = active_px
             
         return await self.request("POST", path, data=body)
 
@@ -237,9 +246,9 @@ class OKXExchange:
 
 
     async def cancel_algo_orders(self, inst_id: str) -> bool:
-        """Fetches and cancels all pending algo orders (conditional, oco, trigger) for the instrument."""
+        """Fetches and cancels all pending algo orders (conditional, oco, trigger, move_order_stop) for the instrument."""
         logger.info(f"[{inst_id}] Initiating cancel for all pending algo orders...")
-        algo_types = ["conditional", "oco", "trigger"]
+        algo_types = ["conditional", "oco", "trigger", "move_order_stop"]
         all_algos = []
         for otype in algo_types:
             try:
