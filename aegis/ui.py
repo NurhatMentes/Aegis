@@ -535,7 +535,7 @@ def render_live_view(is_muted_val):
                 target_tp_ratio = t_info.get("target_tp_ratio", 0.0)
                 esik1_fraction = t_info.get("esik1_fraction", 0.50)
                 tp1_pct = target_tp_ratio * esik1_fraction
-                tp2_pct = target_tp_ratio
+                tp2_pct = target_tp_ratio * esik1_fraction + 0.10
                 
                 tp1_style = "target-achieved" if state_val != "INIT" else "target-highlight"
                 tp2_style = "target-achieved" if state_val == "TRAILING" else "target-highlight"
@@ -618,7 +618,7 @@ def render_live_view(is_muted_val):
                         </div>
                         
                         <div class="{tp2_style}">
-                            <div style="font-size:0.65rem; color:#94a3b8; text-transform:uppercase;">🟢 Eşik 2: Tam Hedef (%100)</div>
+                            <div style="font-size:0.65rem; color:#94a3b8; text-transform:uppercase;">🟢 Eşik 2 (Eşik1+%0.10)</div>
                             <div style="font-size:0.95rem; font-weight:700; color:{'#10b981' if state_val == 'TRAILING' else '#3b82f6'};">
                                 Hedef: ${tp2:.6f} <span style="font-size:0.8rem; opacity:0.8;">(±%{tp2_pct:.2f})</span>
                             </div>

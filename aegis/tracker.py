@@ -572,7 +572,8 @@ class PositionTracker:
                         asyncio.create_task(self.set_exchange_stop_loss(self.breakeven_px))
                 else:
                     self.state = "CLOSED"
-                    self._log_trade(action_event=label, exit_price=self.current_price, note="Pozisyon Tamamen Kapatıldı")
+                    exit_note = {"TRAILING_EXIT": "Takipçi Stop Tetiklendi — Pozisyon Kapatıldı", "BE_EXIT": "Başa Baş Koruması Tetiklendi — Pozisyon Kapatıldı"}.get(label, "Pozisyon Tamamen Kapatıldı")
+                    self._log_trade(action_event=label, exit_price=self.current_price, note=exit_note)
                 logger.info(f"[{self.inst_id}] State transitioned to {self.state} (emergency market path)")
                 return  # finally block will run and release lock
 
@@ -682,7 +683,8 @@ class PositionTracker:
                     pnl_pct = ((self.current_price - self.entry_price) / self.entry_price * self.lever * 100) if self.side == "long" else ((self.entry_price - self.current_price) / self.entry_price * self.lever * 100)
                     self.action_log_cb(f"🔴 [{symbol}] Pozisyon tamamen kapatıldı. Ses kesildi. | Yön: {self.side.upper()} | Kaldıraç: {self.lever}x | Borsada Gerçekleşen Toplam PnL: {pnl_pct:+.2f}%")
                     
-                self._log_trade(action_event=label, exit_price=self.current_price, note="Pozisyon Tamamen Kapatıldı")
+                exit_note = {"TRAILING_EXIT": "Takipçi Stop Tetiklendi — Pozisyon Kapatıldı", "BE_EXIT": "Başa Baş Koruması Tetiklendi — Pozisyon Kapatıldı"}.get(label, "Pozisyon Tamamen Kapatıldı")
+                self._log_trade(action_event=label, exit_price=self.current_price, note=exit_note)
                 
             logger.info(f"[{self.inst_id}] State transitioned to {self.state}")
             
