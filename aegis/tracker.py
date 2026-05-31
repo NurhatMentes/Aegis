@@ -274,10 +274,10 @@ class PositionTracker:
                 self.state = "TRAILING"
                 if self.side == "long":
                     self.highest_price = self.current_price
-                    self.trailing_stop = self.highest_price - (initial_mult * self.atr)
+                    self.trailing_stop = self.highest_price - self.get_trailing_spread(initial_mult)
                 else:
                     self.lowest_price = self.current_price
-                    self.trailing_stop = self.lowest_price + (initial_mult * self.atr)
+                    self.trailing_stop = self.lowest_price + self.get_trailing_spread(initial_mult)
                 
                 # Lock'u serbest bırak: TRAILING state'de tick loop çalışmaya devam etmeli
                 self.is_locked = False
@@ -325,8 +325,8 @@ class PositionTracker:
                 if self.current_price > self.highest_price:
                     self.highest_price = self.current_price
                 
-                # Dynamic ATR gap
-                candidate_stop = self.highest_price - (self.ob_multiplier * self.atr)
+                # Dynamic ATR gap with minimum %0.06
+                candidate_stop = self.highest_price - self.get_trailing_spread(self.ob_multiplier)
                 
                 # Jump Protection: Stop only moves tighter (higher)
                 if self.trailing_stop == 0.0:
@@ -337,7 +337,7 @@ class PositionTracker:
                 logger.debug(f"[{self.inst_id}] Long Trailing: High={self.highest_price:.6f}, Imb={self.ob_imbalance:.2f}, Mult={self.ob_multiplier}, Stop={self.trailing_stop:.6f}")
                 
                 # Check if we should update exchange trailing stop order
-                target_spread = self.ob_multiplier * self.atr
+                target_spread = self.get_trailing_spread(self.ob_multiplier)
                 now = time.time()
                 should_update = False
                 if not getattr(self, "last_placed_spread", None):
@@ -370,8 +370,8 @@ class PositionTracker:
                 if self.current_price < self.lowest_price:
                     self.lowest_price = self.current_price
                 
-                # Dynamic ATR gap
-                candidate_stop = self.lowest_price + (self.ob_multiplier * self.atr)
+                # Dynamic ATR gap with minimum %0.06
+                candidate_stop = self.lowest_price + self.get_trailing_spread(self.ob_multiplier)
                 
                 # Jump Protection: Stop only moves tighter (lower)
                 if self.trailing_stop == 0.0:
@@ -382,7 +382,7 @@ class PositionTracker:
                 logger.debug(f"[{self.inst_id}] Short Trailing: Low={self.lowest_price:.6f}, Imb={self.ob_imbalance:.2f}, Mult={self.ob_multiplier}, Stop={self.trailing_stop:.6f}")
 
                 # Check if we should update exchange trailing stop order
-                target_spread = self.ob_multiplier * self.atr
+                target_spread = self.get_trailing_spread(self.ob_multiplier)
                 now = time.time()
                 should_update = False
                 if not getattr(self, "last_placed_spread", None):
@@ -822,11 +822,17 @@ class PositionTracker:
                 logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] No existing OCO/algo order to cancel.")
 
             # Step 2: Place the new trailing stop
-            gap_distance = self.ob_multiplier * self.atr
+            gap_distance = self.get_trailing_spread(self.ob_multiplier)
             await self.set_exchange_trailing_stop(callback_spread=gap_distance, active_px=self.current_price)
             logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] Native trailing stop placed with spread {gap_distance:.6f} at active_px {self.current_price:.6f}. Ready.")
         except Exception as e:
             logger.exception(f"[{self.inst_id}] Exception in _transition_to_trailing_stop: {e}")
+
+    def get_trailing_spread(self, multiplier: float) -> float:
+        """Calculates trailing spread, enforcing a minimum of 0.06% of current price."""
+        spread = multiplier * self.atr
+        min_spread = self.current_price * 0.0006  # 0.06%
+        return max(spread, min_spread)
 
     def calculate_ob_multiplier(self) -> float:
         """Calculates the dynamic ATR multiplier based on orderbook imbalance."""
