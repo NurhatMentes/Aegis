@@ -6,6 +6,9 @@ from config import get_coin_profile, safe_float
 
 logger = logging.getLogger("Aegis.Tracker")
 
+# Minimum trailing stop mesafesi: fiyatın %0.06'sı
+MIN_TRAILING_GAP_PCT = 0.0006
+
 class PositionTracker:
     def __init__(self, inst_id: str, side: str, size: float, entry_price: float, 
                  target_tp_ratio: float, atr: float, ct_val: float, 
@@ -272,12 +275,14 @@ class PositionTracker:
                 self.ob_multiplier = initial_mult
                 
                 self.state = "TRAILING"
+                min_gap = self.current_price * MIN_TRAILING_GAP_PCT
+                trailing_gap = max(initial_mult * self.atr, min_gap)
                 if self.side == "long":
                     self.highest_price = self.current_price
-                    self.trailing_stop = self.highest_price - self.get_trailing_spread(initial_mult)
+                    self.trailing_stop = self.highest_price - trailing_gap
                 else:
                     self.lowest_price = self.current_price
-                    self.trailing_stop = self.lowest_price + self.get_trailing_spread(initial_mult)
+                    self.trailing_stop = self.lowest_price + trailing_gap
                 
                 # Lock'u serbest bırak: TRAILING state'de tick loop çalışmaya devam etmeli
                 self.is_locked = False
@@ -325,8 +330,10 @@ class PositionTracker:
                 if self.current_price > self.highest_price:
                     self.highest_price = self.current_price
                 
-                # Dynamic ATR gap with minimum %0.06
-                candidate_stop = self.highest_price - self.get_trailing_spread(self.ob_multiplier)
+                # Dynamic ATR gap with minimum %0.06 floor
+                min_gap = self.current_price * MIN_TRAILING_GAP_PCT
+                trailing_gap = max(self.ob_multiplier * self.atr, min_gap)
+                candidate_stop = self.highest_price - trailing_gap
                 
                 # Jump Protection: Stop only moves tighter (higher)
                 if self.trailing_stop == 0.0:
@@ -337,7 +344,7 @@ class PositionTracker:
                 logger.debug(f"[{self.inst_id}] Long Trailing: High={self.highest_price:.6f}, Imb={self.ob_imbalance:.2f}, Mult={self.ob_multiplier}, Stop={self.trailing_stop:.6f}")
                 
                 # Check if we should update exchange trailing stop order
-                target_spread = self.get_trailing_spread(self.ob_multiplier)
+                target_spread = trailing_gap
                 now = time.time()
                 should_update = False
                 if not getattr(self, "last_placed_spread", None):
@@ -370,8 +377,10 @@ class PositionTracker:
                 if self.current_price < self.lowest_price:
                     self.lowest_price = self.current_price
                 
-                # Dynamic ATR gap with minimum %0.06
-                candidate_stop = self.lowest_price + self.get_trailing_spread(self.ob_multiplier)
+                # Dynamic ATR gap with minimum %0.06 floor
+                min_gap = self.current_price * MIN_TRAILING_GAP_PCT
+                trailing_gap = max(self.ob_multiplier * self.atr, min_gap)
+                candidate_stop = self.lowest_price + trailing_gap
                 
                 # Jump Protection: Stop only moves tighter (lower)
                 if self.trailing_stop == 0.0:
@@ -382,7 +391,7 @@ class PositionTracker:
                 logger.debug(f"[{self.inst_id}] Short Trailing: Low={self.lowest_price:.6f}, Imb={self.ob_imbalance:.2f}, Mult={self.ob_multiplier}, Stop={self.trailing_stop:.6f}")
 
                 # Check if we should update exchange trailing stop order
-                target_spread = self.get_trailing_spread(self.ob_multiplier)
+                target_spread = trailing_gap
                 now = time.time()
                 should_update = False
                 if not getattr(self, "last_placed_spread", None):
@@ -821,18 +830,13 @@ class PositionTracker:
             else:
                 logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] No existing OCO/algo order to cancel.")
 
-            # Step 2: Place the new trailing stop
-            gap_distance = self.get_trailing_spread(self.ob_multiplier)
+            # Step 2: Place the new trailing stop (minimum %0.06 floor enforced)
+            min_gap = self.current_price * MIN_TRAILING_GAP_PCT
+            gap_distance = max(self.ob_multiplier * self.atr, min_gap)
             await self.set_exchange_trailing_stop(callback_spread=gap_distance, active_px=self.current_price)
             logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] Native trailing stop placed with spread {gap_distance:.6f} at active_px {self.current_price:.6f}. Ready.")
         except Exception as e:
             logger.exception(f"[{self.inst_id}] Exception in _transition_to_trailing_stop: {e}")
-
-    def get_trailing_spread(self, multiplier: float) -> float:
-        """Calculates trailing spread, enforcing a minimum of 0.06% of current price."""
-        spread = multiplier * self.atr
-        min_spread = self.current_price * 0.0006  # 0.06%
-        return max(spread, min_spread)
 
     def calculate_ob_multiplier(self) -> float:
         """Calculates the dynamic ATR multiplier based on orderbook imbalance."""
