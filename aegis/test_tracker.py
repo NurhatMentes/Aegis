@@ -43,6 +43,10 @@ class MockExchange:
         self.cancelled_orders.append({"inst_id": inst_id, "ord_type": "algo"})
         return True
 
+    async def cancel_pending_limit_orders(self, inst_id):
+        self.cancelled_orders.append({"inst_id": inst_id, "ord_type": "regular_limit"})
+        return True
+
     async def place_algo_order(self, inst_id, side, ord_type, sz, pos_side=None, mgn_mode=None, tp_trigger_px=None, tp_ord_px=None, sl_trigger_px=None, sl_ord_px=None, callback_ratio=None, callback_spread=None, active_px=None):
         self.placed_orders.append({
             "inst_id": inst_id, "side": side, "ord_type": ord_type, "sz": sz,
@@ -353,7 +357,7 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
     # ============ SMART BREAKEVEN TESTS ============
 
     async def test_smart_breakeven_long_above_015(self):
-        """LONG: Eşik 1 TP > %0.15 → breakeven = entry + %0.09"""
+        """LONG: Eşik 1 TP > %0.15 → breakeven = entry + %0.06"""
         exchange = MockExchange()
         tracker = PositionTracker(
             inst_id="BTC-USDT-SWAP",
@@ -369,8 +373,8 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
             esik1_fraction=0.50  # Eşik1 TP = 0.40 * 0.50 = 0.20% > 0.15%
         )
         # Eşik1 TP oranı = 0.004 * 0.50 = 0.0020 (= %0.20) > %0.15
-        # breakeven = 60000 * (1 + 0.0009) = 60054
-        expected_be = 60000.0 * (1.0 + 0.0009)
+        # breakeven = 60000 * (1 + 0.0006) = 60036
+        expected_be = 60000.0 * (1.0 + 0.0006)
         self.assertAlmostEqual(tracker.breakeven_px, expected_be)
         self.assertGreater(tracker.breakeven_px, tracker.entry_price)
 
@@ -395,7 +399,7 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(tracker.breakeven_px, 60000.0)
 
     async def test_smart_breakeven_short_above_015(self):
-        """SHORT: Eşik 1 TP > %0.15 → breakeven = entry - %0.09"""
+        """SHORT: Eşik 1 TP > %0.15 → breakeven = entry - %0.06"""
         exchange = MockExchange()
         tracker = PositionTracker(
             inst_id="BTC-USDT-SWAP",
@@ -410,8 +414,8 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
             pos_side="short",
             esik1_fraction=0.50  # Eşik1 TP = 0.40 * 0.50 = 0.20% > 0.15%
         )
-        # breakeven = 60000 * (1 - 0.0009) = 59946
-        expected_be = 60000.0 * (1.0 - 0.0009)
+        # breakeven = 60000 * (1 - 0.0006) = 59964
+        expected_be = 60000.0 * (1.0 - 0.0006)
         self.assertAlmostEqual(tracker.breakeven_px, expected_be)
         self.assertLess(tracker.breakeven_px, tracker.entry_price)
 
@@ -473,7 +477,7 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         
         # Update to higher ratio: 0.40% → Eşik1 = 0.20% > 0.15%
         tracker.update_targets(0.40, new_esik1_fraction=0.50)
-        expected_be = 60000.0 * (1.0 + 0.0009)
+        expected_be = 60000.0 * (1.0 + 0.0006)
         self.assertAlmostEqual(tracker.breakeven_px, expected_be)
 
     async def test_smart_breakeven_sl_placement_on_exchange(self):
@@ -493,7 +497,7 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
             esik1_fraction=0.50
         )
         
-        expected_be = 80.0 * (1.0 + 0.0009)  # 80.072
+        expected_be = 80.0 * (1.0 + 0.0006)  # 80.048
         self.assertAlmostEqual(tracker.breakeven_px, expected_be)
         
         # Execute TP1

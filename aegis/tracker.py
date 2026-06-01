@@ -83,14 +83,14 @@ class PositionTracker:
             self.tp1_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction)
             self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction - ESIK2_FIXED_INCREMENT)
 
-        # Smart Breakeven: Eşik 1 TP oranı %0.15'ten yüksekse, SL'yi girişin %0.09 üstüne kur
+        # Smart Breakeven: Eşik 1 TP oranı %0.15'ten yüksekse, SL'yi girişin %0.06 üstüne kur
         # Böylece komisyon dahil küçük bir kâr garanti altına alınır.
         esik1_tp_pct = self.target_tp_fraction * self.esik1_fraction  # örn: 0.00175
         if esik1_tp_pct > 0.0015:  # > %0.15
             if self.side == "long":
-                self.breakeven_px = self.entry_price * (1.0 + 0.0009)
+                self.breakeven_px = self.entry_price * (1.0 + 0.0006)
             else:
-                self.breakeven_px = self.entry_price * (1.0 - 0.0009)
+                self.breakeven_px = self.entry_price * (1.0 - 0.0006)
         else:
             self.breakeven_px = self.entry_price
 
@@ -162,9 +162,9 @@ class PositionTracker:
             esik1_tp_pct = self.target_tp_fraction * self.esik1_fraction
             if esik1_tp_pct > 0.0015:  # > %0.15
                 if self.side == "long":
-                    self.breakeven_px = self.entry_price * (1.0 + 0.0009)
+                    self.breakeven_px = self.entry_price * (1.0 + 0.0006)
                 else:
-                    self.breakeven_px = self.entry_price * (1.0 - 0.0009)
+                    self.breakeven_px = self.entry_price * (1.0 - 0.0006)
             else:
                 self.breakeven_px = self.entry_price
                 
@@ -433,6 +433,8 @@ class PositionTracker:
             await self.exchange.cancel_algo_orders(self.inst_id)
             self.algo_sl_id = None
             self.algo_tp_id = None
+            # Also cancel any pending regular limit orders (e.g. Skynet's limit TP)
+            await self.exchange.cancel_pending_limit_orders(self.inst_id)
             # 1. Round/Format order size
             # Order size is size * size_pct. Let's get instrument info from exchange
             inst_info = self.exchange.get_instrument_info(self.inst_id)
@@ -676,7 +678,7 @@ class PositionTracker:
                     self.state = "RISK_ZERO"
                     if self.action_log_cb:
                         symbol = self.inst_id.replace("-SWAP", "")
-                        be_label = f"girişin %0.09 üstü (${self.breakeven_px:.6f})" if self.breakeven_px != self.entry_price else f"BAŞA BAŞ (${self.breakeven_px:.6f})"
+                        be_label = f"girişin %0.06 üstü (${self.breakeven_px:.6f})" if self.breakeven_px != self.entry_price else f"BAŞA BAŞ (${self.breakeven_px:.6f})"
                         self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış onaylandı. [{self.side.upper()} - {self.lever}x] Stop-Loss noktası {be_label} seviyesine kilitlendi. Eşik 2 takipçi stop için bekleniyor. Durum: RISK_ZERO (Risk Sıfır!).")
                         
                     self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=price, note="30% Kısmi Kâr Alma")
@@ -847,11 +849,10 @@ class PositionTracker:
                 return 0.4
             else:
                 return 1.0
-        else:  # short
+        else:  # shorts
             if self.ob_imbalance < -0.15:
                 return 1.5
             elif self.ob_imbalance > 0.20:
                 return 0.4
             else:
                 return 1.0
-

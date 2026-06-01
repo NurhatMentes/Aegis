@@ -292,6 +292,57 @@ class OKXExchange:
 
         return success
 
+    async def cancel_pending_limit_orders(self, inst_id: str) -> bool:
+        """Fetches and cancels all pending regular (non-algo) limit orders for the instrument.
+        
+        This catches orders placed by external systems (e.g. Skynet) via the standard
+        /api/v5/trade/order endpoint — these are NOT covered by cancel_algo_orders.
+        """
+        logger.info(f"[{inst_id}] Initiating cancel for all pending regular (limit) orders...")
+        try:
+            path = f"/api/v5/trade/orders-pending?instType=SWAP&instId={inst_id}"
+            res = await self.request("GET", path)
+            if not res or res.get("code") != "0":
+                err_msg = res.get("msg", "Unknown error") if res else "No response"
+                logger.error(f"[{inst_id}] Failed fetching pending regular orders: {err_msg}")
+                return False
+
+            pending = res.get("data", [])
+            if not pending:
+                logger.info(f"[{inst_id}] No pending regular orders found to cancel.")
+                return True
+
+            # Build cancel payload — OKX batch cancel accepts up to 20 orders
+            cancel_payload = []
+            for order in pending:
+                ord_id = order.get("ordId")
+                if ord_id:
+                    cancel_payload.append({
+                        "instId": inst_id,
+                        "ordId": ord_id
+                    })
+
+            success = True
+            for i in range(0, len(cancel_payload), 20):
+                chunk = cancel_payload[i:i+20]
+                try:
+                    cancel_path = "/api/v5/trade/cancel-batch-orders"
+                    cancel_res = await self.request("POST", cancel_path, data=chunk)
+                    if cancel_res and cancel_res.get("code") == "0":
+                        logger.info(f"[{inst_id}] Successfully cancelled {len(chunk)} pending regular order(s).")
+                    else:
+                        err_msg = cancel_res.get("msg", "Unknown error") if cancel_res else "No response"
+                        logger.error(f"[{inst_id}] Failed cancelling regular orders chunk: {err_msg}")
+                        success = False
+                except Exception as e:
+                    logger.error(f"[{inst_id}] Exception during regular order cancellation: {e}")
+                    success = False
+
+            return success
+        except Exception as e:
+            logger.error(f"[{inst_id}] Exception in cancel_pending_limit_orders: {e}")
+            return False
+
     async def get_order(self, inst_id: str, ord_id: str) -> dict:
         """Queries order status details."""
         path = f"/api/v5/trade/order?instId={inst_id}&ordId={ord_id}"

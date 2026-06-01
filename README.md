@@ -76,3 +76,27 @@ python -m streamlit run aegis/ui.py
 - **API Bilgileri:** Sol taraftaki menüden API bilgilerinizi güncelleyip anında test edebilirsiniz.
 - **Motor Ayarları:** "Eşik 1 Kar Alma Oranı" nı (örneğin %50) motoru durdurmadan değiştirebilirsiniz. Motor bu değişikliği anında algılayacaktır.
 - **Radar ve Metrikler:** Açık olan pozisyonlarınızın kâr/zarar durumunu ve Eşik 1 / Eşik 2 mesafelerini anlık olarak görebilirsiniz.
+
+---
+
+## 🧠 Aegis Algoritma Kılavuzu & Sistem Mantığı
+
+Aegis, pozisyon riskini sıfırlamak ve kârı maksimize etmek için 5 temel kural üzerine inşa edilmiş kademeli bir çıkış stratejisi kullanır. Dış sistemler (örn. Skynet) pozisyona girdikten sonra Aegis bu kuralları katı bir şekilde uygular:
+
+1. **Eşik 1'de Tam Temizlik (Emir İptalleri):**
+   Eşik 1 seviyesi tetiklendiğinde (örneğin %30 kâr alımı yapılırken), mevcut tüm algo emirleri (eski SL/TP) ve Skynet'in önceden kurmuş olabileceği normal limit emirleri (bekleyen satış/alış emirleri) anında iptal edilir. Bu sayede emir defterinde çakışma yaşanmaz ve bakiye boşa çıkarılır.
+
+2. **Smart Breakeven (Akıllı Başa Baş & %0.06 Kâr Kilidi):**
+   Eşik 1 kâr alımı gerçekleştiğinde, Stop-Loss seviyesi risk-free (risksiz) hale getirilir:
+   - Eğer Eşik 1'in getirdiği hedef kâr oranı **>%0.15** ise, Stop-Loss doğrudan pozisyon giriş seviyesinin **%0.06 kâr yönüne** (Long için %0.06 üstüne, Short için %0.06 altına) kilitlenir. Böylece komisyonlar karşılanır ve kesin küçük bir kâr garanti edilir.
+   - Eğer Eşik 1 hedefi dar bir aralıktaysa (<= %0.15), Stop-Loss tam **giriş seviyesine (başa baş)** konur. Böylece piyasa gürültüsü nedeniyle SL'nin anında patlaması önlenir ve fiyata nefes alacak alan bırakılır.
+
+3. **Sabit Eşik 2 Mesafesi:**
+   Eşik 2 hedef seviyesi dinamik hesaplanmaz, Eşik 1 noktasından itibaren her zaman **sabit %0.10 daha kârlı yöndedir** (Örn: Long için Eşik 1 + %0.10). 
+
+4. **Eşik 2'de Trailing Stop Geçişi:**
+   Fiyat Eşik 2 seviyesine ulaştığında, Smart Breakeven aşamasında kurulan kilitli Stop-Loss emri iptal edilir ve tamamen dinamik **Trailing Stop (İzleyen Stop)** mekanizması devreye girer. Artık pozisyon kârı piyasa elverdiğince takip edilir.
+
+5. **Minimum Trailing Gap (%0.06 Kuralı):**
+   Devreye giren Trailing Stop mesafesi anlık piyasa volatilitesine (ATR) göre belirlenir. Ancak fiyat ne kadar hareketsiz olursa olsun (ATR çok düşse bile), takipçi stop mesafesi **hiçbir zaman fiyatın %0.06'sından daha dar olamaz**. Bu sayede ufak fiyat sıçramalarında haksız yere pozisyondan atılma engellenir.
+
