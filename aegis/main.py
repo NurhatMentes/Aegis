@@ -388,7 +388,7 @@ class AegisOrchestrator:
             self.action_logs.pop(0)
         self.serialize_state()
 
-    def log_trade_event(self, session_id: str, symbol: str, side: str, leverage: float, action_event: str, price: float, spot_move_pct: float, realized_pnl: float, note: str):
+    def log_trade_event(self, session_id: str, symbol: str, side: str, leverage: float, action_event: str, price: float, spot_move_pct: float, realized_pnl: float, smart_be_offset_pct: float, min_trailing_gap_pct: float, note: str):
         """Appends a trade event to the persistent CSV ledger in a thread-safe manner."""
         csv_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "aegis_trade_ledger.csv")
         ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -396,7 +396,7 @@ class AegisOrchestrator:
         # Clean inputs
         note = note.replace(",", ";")
         
-        row = f"{ts},{session_id},{symbol},{side},{leverage},{action_event},{price:.6f},{spot_move_pct:.4f},{realized_pnl:.4f},{note}\n"
+        row = f"{ts},{session_id},{symbol},{side},{leverage},{action_event},{price:.6f},{spot_move_pct:.4f},{realized_pnl:.4f},{smart_be_offset_pct:.4f},{min_trailing_gap_pct:.4f},{note}\n"
         
         retries = 3
         for i in range(retries):
@@ -404,7 +404,7 @@ class AegisOrchestrator:
                 # Add header if it doesn't exist
                 if not os.path.exists(csv_path):
                     with open(csv_path, "w", encoding="utf-8") as f:
-                        f.write("timestamp,session_id,symbol,side,leverage,action_event,price,spot_move_pct,realized_pnl,note\n")
+                        f.write("timestamp,session_id,symbol,side,leverage,action_event,price,spot_move_pct,realized_pnl,smart_be_offset_pct,min_trailing_gap_pct,note\n")
                         
                 with open(csv_path, "a", encoding="utf-8") as f:
                     f.write(row)
@@ -561,12 +561,26 @@ class AegisOrchestrator:
         
         # Load dynamic settings
         esik1_fraction = 0.50
+        min_trailing_gap_pct = None
+        smart_be_offset_pct = None
         settings_path = "aegis/aegis_settings.json"
         if os.path.exists(settings_path):
             try:
                 with open(settings_path, "r") as f:
                     stg = json.load(f)
                     esik1_fraction = stg.get("esik1_ratio_pct", 50.0) / 100.0
+                    if "min_trailing_gap_pct" in stg:
+                        min_trailing_gap_pct = stg["min_trailing_gap_pct"] / 100.0  # %0.17 -> 0.0017
+                    if "smart_be_offset_pct" in stg:
+                        smart_be_offset_pct = stg["smart_be_offset_pct"] / 100.0  # %0.12 -> 0.0012
+                    # Coin bazlı profil kontrolü
+                    coin_profiles = stg.get("coin_profiles", {})
+                    if inst_id in coin_profiles:
+                        cp = coin_profiles[inst_id]
+                        if "esik1_ratio_pct" in cp:
+                            esik1_fraction = cp["esik1_ratio_pct"] / 100.0
+                        if "min_trailing_gap_pct" in cp:
+                            min_trailing_gap_pct = cp["min_trailing_gap_pct"] / 100.0
             except: pass
         
         tracker = PositionTracker(
@@ -583,7 +597,9 @@ class AegisOrchestrator:
             action_log_cb=self.add_action_log,
             trade_ledger_cb=self.log_trade_event,
             lever=lever,
-            esik1_fraction=esik1_fraction
+            esik1_fraction=esik1_fraction,
+            min_trailing_gap_pct=min_trailing_gap_pct,
+            smart_be_offset_pct=smart_be_offset_pct
         )
         
         # Check if we can restore algo order IDs and FSM state from persisted state JSON
@@ -635,16 +651,21 @@ class AegisOrchestrator:
         
         # If tracker is not CLOSED (closed externally or offline), log to CSV ledger
         if tracker.state != "CLOSED":
-            tracker.state = "CLOSED"
             exit_price = tracker.current_price if tracker.current_price > 0 else tracker.entry_price
-            reason_tr = reason
-            if "No active position found via REST" in reason:
-                reason_tr = "REST senkronizasyonu sırasında aktif pozisyon bulunamadı"
-            elif "WebSocket position size hit 0" in reason:
-                reason_tr = "WebSocket pozisyon büyüklüğü 0'a düştü"
-            tracker._log_trade(action_event="EXTERNAL_CLOSE", exit_price=exit_price, note=f"Dışarıdan kapatıldı: {reason_tr}")
-            
-        tracker.state = "CLOSED"
+            if tracker.state == "TRAILING":
+                tracker.state = "CLOSED"
+                tracker._log_trade(action_event="TRAILING_EXIT", exit_price=exit_price, note="Takipçi Stop Tetiklendi — Pozisyon Kapatıldı")
+            elif tracker.state == "RISK_ZERO":
+                tracker.state = "CLOSED"
+                tracker._log_trade(action_event="BE_EXIT", exit_price=exit_price, note="Başa Baş Koruması Tetiklendi — Pozisyon Kapatıldı")
+            else:
+                tracker.state = "CLOSED"
+                reason_tr = reason
+                if "No active position found via REST" in reason:
+                    reason_tr = "REST senkronizasyonu sırasında aktif pozisyon bulunamadı"
+                elif "WebSocket position size hit 0" in reason:
+                    reason_tr = "WebSocket pozisyon büyüklüğü 0'a düştü"
+                tracker._log_trade(action_event="EXTERNAL_CLOSE", exit_price=exit_price, note=f"Dışarıdan kapatıldı: {reason_tr}")
         
         # Request dynamic unsubscribe
         await self.ws_sub_queue.put(("unsubscribe", inst_id))
@@ -698,15 +719,24 @@ class AegisOrchestrator:
                         if tp_px and inst not in exchange_tp_px_map:
                             exchange_tp_px_map[inst] = float(tp_px)
                     
-                    # Read dynamic settings for esik1_fraction
+                    # Read dynamic settings for esik1_fraction and new parameters
                     esik1_fraction = 0.50
+                    min_trailing_gap_pct = None
+                    smart_be_offset_pct = None
                     settings_path = "aegis/aegis_settings.json"
                     if os.path.exists(settings_path):
                         try:
                             with open(settings_path, "r") as f:
                                 stg = json.load(f)
                                 esik1_fraction = stg.get("esik1_ratio_pct", 50.0) / 100.0
-                        except: pass
+                                if "min_trailing_gap_pct" in stg:
+                                    min_trailing_gap_pct = stg["min_trailing_gap_pct"] / 100.0
+                                if "smart_be_offset_pct" in stg:
+                                    smart_be_offset_pct = stg["smart_be_offset_pct"] / 100.0
+                                coin_profiles = stg.get("coin_profiles", {})
+                        except: 
+                            coin_profiles = {}
+                            pass
 
                     # Update dynamic targets for existing active trackers
                     for inst_id, tracker in self.active_trackers.items():
@@ -716,8 +746,19 @@ class AegisOrchestrator:
                         if inst_id in exchange_tp_px_map and tracker.entry_price > 0:
                             tp_price = exchange_tp_px_map[inst_id]
                             new_tp = abs(tp_price - tracker.entry_price) / tracker.entry_price * 100.0
+                        
+                        # Coin bazlı profil override
+                        tracker_esik1 = esik1_fraction
+                        tracker_min_gap = min_trailing_gap_pct
+                        tracker_smart_be = smart_be_offset_pct
+                        if inst_id in coin_profiles:
+                            cp = coin_profiles[inst_id]
+                            if "esik1_ratio_pct" in cp:
+                                tracker_esik1 = cp["esik1_ratio_pct"] / 100.0
+                            if "min_trailing_gap_pct" in cp:
+                                tracker_min_gap = cp["min_trailing_gap_pct"] / 100.0
                             
-                        tracker.update_targets(new_tp, esik1_fraction)
+                        tracker.update_targets(new_tp, tracker_esik1, new_min_trailing_gap_pct=tracker_min_gap, new_smart_be_offset_pct=tracker_smart_be)
                     
                     found_insts = set()
                     for pos_data in active_positions:

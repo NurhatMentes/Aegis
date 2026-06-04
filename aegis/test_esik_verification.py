@@ -3,15 +3,15 @@ Eşik 1 / Eşik 2 / Trailing Stop Doğrulama Testleri
 ====================================================
 Kullanıcının 5 kuralını doğrular:
 1. Eşik 1'de tüm açık emirler iptal edilir
-2. Eşik 1'de SL = girişin %0.06 yukarısına kurulur (Smart Breakeven)
+2. Eşik 1'de SL = girişin %0.12 altına kurulur (Smart Breakeven)
 3. Eşik 2 = Eşik 1 + %0.10
 4. Eşik 2'de SL iptal edilir ve trailing stop kurulur
-5. Trailing stop minimum %0.06
+5. Trailing stop minimum %0.17
 """
 import asyncio
 import unittest
 from unittest.mock import AsyncMock, MagicMock, patch
-from tracker import PositionTracker, MIN_TRAILING_GAP_PCT
+from tracker import PositionTracker, DEFAULT_MIN_TRAILING_GAP_PCT
 
 
 class MockExchange:
@@ -143,12 +143,12 @@ class TestKural1_Esik1EmirIptali(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(len(limit_cancels), 1, "cancel_pending_limit_orders çağrılmadı! Skynet'in limit emirleri iptal edilmiyor!")
 
 # ============================================================
-# KURAL 2: Eşik 1'de SL = girişin %0.06 yukarısına kurulur
+# KURAL 2: Eşik 1'de SL = girişin %0.12 altına kurulur
 # ============================================================
 class TestKural2_Esik1StopLossSeviyesi(unittest.IsolatedAsyncioTestCase):
 
-    async def test_breakeven_sl_long_is_006_above_entry(self):
-        """LONG: Eşik 1 TP > %0.15 ise SL = entry * (1 + 0.0006) = %0.06 üstü olmalı."""
+    async def test_breakeven_sl_long_is_012_below_entry(self):
+        """LONG: Eşik 1 TP > %0.15 ise SL = entry * (1 - 0.0012) = %0.12 altı olmalı."""
         exchange = MockExchange()
         tracker = PositionTracker(
             inst_id="BTC-USDT-SWAP", side="long", size=10.0,
@@ -157,24 +157,24 @@ class TestKural2_Esik1StopLossSeviyesi(unittest.IsolatedAsyncioTestCase):
         )
         # Eşik1 TP oranı = 0.004 * 0.50 = 0.0020 = %0.20 > %0.15 → Smart Breakeven aktif
 
-        expected_be = 60000.0 * (1.0 + 0.0006)  # %0.06 yukarısı = 60036
+        expected_be = 60000.0 * (1.0 - 0.0012)  # %0.12 altı = 59928
         self.assertAlmostEqual(
             tracker.breakeven_px, expected_be, places=2,
-            msg=f"SL girişin %0.06 üstünde olmalı ({expected_be}), ama {tracker.breakeven_px} bulundu"
+            msg=f"SL girişin %0.12 altında olmalı ({expected_be}), ama {tracker.breakeven_px} bulundu"
         )
 
-    async def test_breakeven_sl_short_is_006_below_entry(self):
-        """SHORT: Eşik 1 TP > %0.15 ise SL = entry * (1 - 0.0006) = %0.06 altı olmalı."""
+    async def test_breakeven_sl_short_is_012_above_entry(self):
+        """SHORT: Eşik 1 TP > %0.15 ise SL = entry * (1 + 0.0012) = %0.12 üstü olmalı."""
         exchange = MockExchange()
         tracker = PositionTracker(
             inst_id="BTC-USDT-SWAP", side="short", size=10.0,
             entry_price=60000.0, target_tp_ratio=0.40, atr=100.0,
             ct_val=0.01, exchange_interface=exchange, esik1_fraction=0.50
         )
-        expected_be = 60000.0 * (1.0 - 0.0006)  # %0.06 altı = 59964
+        expected_be = 60000.0 * (1.0 + 0.0012)  # %0.12 üstü = 60072
         self.assertAlmostEqual(
             tracker.breakeven_px, expected_be, places=2,
-            msg=f"SL girişin %0.06 altında olmalı ({expected_be}), ama {tracker.breakeven_px} bulundu"
+            msg=f"SL girişin %0.12 üstünde olmalı ({expected_be}), ama {tracker.breakeven_px} bulundu"
         )
 
     async def test_sl_placed_on_exchange_at_breakeven_after_tp1(self):
@@ -331,19 +331,19 @@ class TestKural4_Esik2TrailingStopGecisi(unittest.IsolatedAsyncioTestCase):
 
 
 # ============================================================
-# KURAL 5: Trailing stop minimum %0.06
+# KURAL 5: Trailing stop minimum %0.17
 # ============================================================
 class TestKural5_MinTrailingStop(unittest.IsolatedAsyncioTestCase):
 
     async def test_min_trailing_gap_constant(self):
-        """MIN_TRAILING_GAP_PCT sabiti %0.06 = 0.0006 olmalı."""
+        """DEFAULT_MIN_TRAILING_GAP_PCT sabiti %0.17 = 0.0017 olmalı."""
         self.assertAlmostEqual(
-            MIN_TRAILING_GAP_PCT, 0.0006, places=6,
-            msg=f"MIN_TRAILING_GAP_PCT = {MIN_TRAILING_GAP_PCT}, beklenen = 0.0006"
+            DEFAULT_MIN_TRAILING_GAP_PCT, 0.0017, places=6,
+            msg=f"DEFAULT_MIN_TRAILING_GAP_PCT = {DEFAULT_MIN_TRAILING_GAP_PCT}, beklenen = 0.0017"
         )
 
     async def test_trailing_gap_uses_min_when_atr_too_small_long(self):
-        """LONG: ATR çok küçükse trailing gap = price * 0.0006 (minimum %0.06) olur."""
+        """LONG: ATR çok küçükse trailing gap = price * 0.0017 (minimum %0.17) olur."""
         exchange = MockExchange()
         tracker = PositionTracker(
             inst_id="BTC-USDT-SWAP", side="long", size=7.0,
@@ -360,19 +360,19 @@ class TestKural5_MinTrailingStop(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         self.assertEqual(tracker.state, "TRAILING")
-        # min_gap = 60200 * 0.0006 = 36.12
+        # min_gap = 60200 * 0.0017 = 102.34
         # ATR gap = 1.0 * 0.01 = 0.01
-        # trailing_gap = max(0.01, 36.12) = 36.12
-        expected_min_gap = price * MIN_TRAILING_GAP_PCT
+        # trailing_gap = max(0.01, 102.34) = 102.34
+        expected_min_gap = price * DEFAULT_MIN_TRAILING_GAP_PCT
         expected_trailing_stop = price - expected_min_gap
 
         self.assertAlmostEqual(
             tracker.trailing_stop, expected_trailing_stop, places=2,
-            msg=f"Trailing stop {tracker.trailing_stop}, beklenen {expected_trailing_stop} (%0.06 minimum)"
+            msg=f"Trailing stop {tracker.trailing_stop}, beklenen {expected_trailing_stop} (%0.17 minimum)"
         )
 
     async def test_trailing_gap_uses_min_when_atr_too_small_short(self):
-        """SHORT: ATR çok küçükse trailing gap = price * 0.0006 (minimum %0.06) olur."""
+        """SHORT: ATR çok küçükse trailing gap = price * 0.0017 (minimum %0.17) olur."""
         exchange = MockExchange()
         tracker = PositionTracker(
             inst_id="BTC-USDT-SWAP", side="short", size=7.0,
@@ -389,16 +389,16 @@ class TestKural5_MinTrailingStop(unittest.IsolatedAsyncioTestCase):
         await asyncio.sleep(0.05)
 
         self.assertEqual(tracker.state, "TRAILING")
-        expected_min_gap = price * MIN_TRAILING_GAP_PCT
+        expected_min_gap = price * DEFAULT_MIN_TRAILING_GAP_PCT
         expected_trailing_stop = price + expected_min_gap
 
         self.assertAlmostEqual(
             tracker.trailing_stop, expected_trailing_stop, places=2,
-            msg=f"Trailing stop {tracker.trailing_stop}, beklenen {expected_trailing_stop} (%0.06 minimum)"
+            msg=f"Trailing stop {tracker.trailing_stop}, beklenen {expected_trailing_stop} (%0.17 minimum)"
         )
 
-    async def test_trailing_gap_never_below_006_during_updates(self):
-        """TRAILING state'de fiyat güncellenirken gap asla %0.06'nın altına düşmemeli."""
+    async def test_trailing_gap_never_below_017_during_updates(self):
+        """TRAILING state'de fiyat güncellenirken gap asla %0.17'nin altına düşmemeli."""
         exchange = MockExchange()
         tracker = PositionTracker(
             inst_id="BTC-USDT-SWAP", side="long", size=7.0,
@@ -409,13 +409,13 @@ class TestKural5_MinTrailingStop(unittest.IsolatedAsyncioTestCase):
         # Manually set to TRAILING
         tracker.state = "TRAILING"
         tracker.highest_price = 60200.0
-        tracker.trailing_stop = 60200.0 - (60200.0 * MIN_TRAILING_GAP_PCT)
+        tracker.trailing_stop = 60200.0 - (60200.0 * DEFAULT_MIN_TRAILING_GAP_PCT)
 
         # Simulate price updates
         for price in [60250.0, 60300.0, 60350.0, 60400.0]:
             tracker.update_tick(price, volume_ratio=0.5, ob_imbalance=0.0)
             gap = tracker.highest_price - tracker.trailing_stop
-            min_allowed = tracker.highest_price * MIN_TRAILING_GAP_PCT
+            min_allowed = tracker.highest_price * DEFAULT_MIN_TRAILING_GAP_PCT
             self.assertGreaterEqual(
                 gap, min_allowed * 0.999,  # Tiny floating point tolerance
                 msg=f"Price={price}: gap={gap:.4f} < min_allowed={min_allowed:.4f}"

@@ -315,19 +315,100 @@ if edit_mode:
     st.sidebar.markdown("### ⚙️ Motor Ayarları")
     settings_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "aegis_settings.json")
     current_esik1 = 50.0
+    current_min_trail = 0.17
+    current_smart_be = 0.12
+    current_coin_profiles = {}
     if os.path.exists(settings_path):
         try:
             with open(settings_path, "r") as f:
                 stg = json.load(f)
                 current_esik1 = float(stg.get("esik1_ratio_pct", 50.0))
+                current_min_trail = float(stg.get("min_trailing_gap_pct", 0.17))
+                current_smart_be = float(stg.get("smart_be_offset_pct", 0.12))
+                current_coin_profiles = stg.get("coin_profiles", {})
         except: pass
         
     with st.sidebar.form("motor_settings_form"):
-        new_esik1 = st.slider("Eşik 1 Kar Al Oranı (%)", min_value=10.0, max_value=90.0, value=current_esik1, step=5.0)
+        new_esik1 = st.slider("Eşik 1 Kar Al Oranı (%)", min_value=10.0, max_value=90.0, value=current_esik1, step=5.0,
+                              help="Skynet hedefinin yüzdesi olarak Eşik 1 tetikleme noktası")
+        new_min_trail = st.slider("Min. Trailing Stop Mesafesi (%)", min_value=0.05, max_value=1.00, value=current_min_trail, step=0.01,
+                                  help="Takipçi stop'un fiyattan minimum uzaklığı (yüzde olarak)")
+        new_smart_be = st.slider("Smart BE Stop Offset (%)", min_value=0.01, max_value=0.50, value=current_smart_be, step=0.01,
+                                 help="Eşik1 TP > %0.15 olduğunda SL'nin giriş fiyatından uzaklığı (Long: altı, Short: üstü)")
         if st.form_submit_button("Motor Ayarlarını Kaydet"):
+            save_data = {
+                "esik1_ratio_pct": new_esik1,
+                "min_trailing_gap_pct": new_min_trail,
+                "smart_be_offset_pct": new_smart_be,
+                "coin_profiles": current_coin_profiles
+            }
             with open(settings_path, "w") as f:
-                json.dump({"esik1_ratio_pct": new_esik1}, f)
+                json.dump(save_data, f, indent=2)
             st.sidebar.success("Motor ayarları güncellendi! Anında aktif olacaktır (Yeniden başlatma gerektirmez).")
+
+    # ==================== COIN BAZLI PROFİL YÖNETİMİ ====================
+    st.sidebar.markdown("---")
+    st.sidebar.markdown("### 🎯 Coin Bazlı Profiller")
+    st.sidebar.caption("Belirli coinler için özel Eşik 1 TP oranı ve Trailing Stop min mesafesi ayarlayın. Tanımlanmamış coinler global ayarları kullanır.")
+
+    # Reload current profiles from disk
+    if os.path.exists(settings_path):
+        try:
+            with open(settings_path, "r") as f:
+                stg_reload = json.load(f)
+                current_coin_profiles = stg_reload.get("coin_profiles", {})
+        except: pass
+
+    # Display existing profiles
+    if current_coin_profiles:
+        for cp_inst_id, cp_data in list(current_coin_profiles.items()):
+            cp_esik1 = cp_data.get("esik1_ratio_pct", "-")
+            cp_min_trail = cp_data.get("min_trailing_gap_pct", "-")
+            col_info, col_del = st.sidebar.columns([4, 1])
+            with col_info:
+                st.markdown(f"**{cp_inst_id}** — Eşik1: %{cp_esik1} | MinTS: %{cp_min_trail}")
+            with col_del:
+                if st.button("🗑️", key=f"del_cp_{cp_inst_id}", help=f"{cp_inst_id} profilini sil"):
+                    # Delete this coin profile
+                    try:
+                        with open(settings_path, "r") as f:
+                            stg_del = json.load(f)
+                        stg_del.get("coin_profiles", {}).pop(cp_inst_id, None)
+                        with open(settings_path, "w") as f:
+                            json.dump(stg_del, f, indent=2)
+                        st.sidebar.success(f"{cp_inst_id} profili silindi!")
+                        st.rerun()
+                    except Exception as e:
+                        st.sidebar.error(f"Silme hatası: {e}")
+    else:
+        st.sidebar.info("Henüz özel coin profili tanımlanmamış.")
+
+    # Add new coin profile form
+    with st.sidebar.form("add_coin_profile_form"):
+        st.markdown("**Yeni Profil Ekle**")
+        cp_new_inst = st.text_input("Coin (ör: PEPE-USDT-SWAP)", value="", help="OKX enstrüman ID formatında yazın")
+        cp_new_esik1 = st.slider("Eşik 1 TP Oranı (%)", min_value=10.0, max_value=90.0, value=50.0, step=5.0, key="cp_esik1_slider")
+        cp_new_min_trail = st.slider("Min Trailing Stop Mesafesi (%)", min_value=0.05, max_value=1.00, value=0.17, step=0.01, key="cp_min_trail_slider")
+        if st.form_submit_button("➕ Profil Ekle / Güncelle"):
+            cp_new_inst_clean = cp_new_inst.strip().upper()
+            if cp_new_inst_clean:
+                try:
+                    with open(settings_path, "r") as f:
+                        stg_add = json.load(f)
+                    if "coin_profiles" not in stg_add:
+                        stg_add["coin_profiles"] = {}
+                    stg_add["coin_profiles"][cp_new_inst_clean] = {
+                        "esik1_ratio_pct": cp_new_esik1,
+                        "min_trailing_gap_pct": cp_new_min_trail
+                    }
+                    with open(settings_path, "w") as f:
+                        json.dump(stg_add, f, indent=2)
+                    st.sidebar.success(f"{cp_new_inst_clean} profili kaydedildi!")
+                    st.rerun()
+                except Exception as e:
+                    st.sidebar.error(f"Kayıt hatası: {e}")
+            else:
+                st.sidebar.warning("Lütfen geçerli bir coin adı girin.")
 
 @fragment_decorator(run_every=1.0)
 def render_live_view(is_muted_val):
@@ -644,6 +725,34 @@ def render_historical_view():
     if state is None:
         state = st.session_state.last_state
         
+    # Auto-migrate trade ledger CSV schema if necessary
+    ledger_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "aegis_trade_ledger.csv")
+    if os.path.exists(ledger_path):
+        try:
+            with open(ledger_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            if lines:
+                first_line = lines[0].strip()
+                if len(first_line.split(",")) == 10:
+                    new_lines = []
+                    new_header = "timestamp,session_id,symbol,side,leverage,action_event,price,spot_move_pct,realized_pnl,smart_be_offset_pct,min_trailing_gap_pct,note\n"
+                    new_lines.append(new_header)
+                    for line in lines[1:]:
+                        line_str = line.strip()
+                        if not line_str:
+                            continue
+                        parts = line_str.split(",")
+                        if len(parts) == 10:
+                            parts.insert(9, "")
+                            parts.insert(9, "")
+                            new_lines.append(",".join(parts) + "\n")
+                        else:
+                            new_lines.append(line_str + "\n")
+                    with open(ledger_path, "w", encoding="utf-8") as f:
+                        f.writelines(new_lines)
+        except Exception as e:
+            st.warning(f"CSV auto-migration error: {e}")
+        
     col_lbl, col_btn = st.columns([8, 1.2])
     with col_lbl:
         st.markdown('<div style="font-weight: 700; font-size: 1.25rem; color: #f8fafc; margin-top: 1rem; margin-bottom: 0.5rem;">📊 Sistem Geçmişi & Performans Kayıtları</div>', unsafe_allow_html=True)
@@ -703,7 +812,36 @@ def render_historical_view():
                 if df.empty:
                     st.info("Henüz kaydedilmiş bir işlem verisi (Ledger) bulunmuyor.")
                 else:
-                    if "session_id" in df.columns:
+                    display_df = df.copy()
+                    
+                    # Format existing columns if they are present
+                    if "spot_move_pct" in display_df.columns:
+                        display_df["spot_move_pct"] = display_df["spot_move_pct"].apply(lambda x: f"%{x:+.2f}" if pd.notnull(x) else "-")
+                    if "realized_pnl" in display_df.columns:
+                        display_df["realized_pnl"] = display_df["realized_pnl"].apply(lambda x: f"%{x:+.2f}" if pd.notnull(x) else "-")
+                    if "smart_be_offset_pct" in display_df.columns:
+                        display_df["smart_be_offset_pct"] = display_df["smart_be_offset_pct"].apply(lambda x: f"%{x:.2f}" if pd.notnull(x) else "-")
+                    if "min_trailing_gap_pct" in display_df.columns:
+                        display_df["min_trailing_gap_pct"] = display_df["min_trailing_gap_pct"].apply(lambda x: f"%{x:.2f}" if pd.notnull(x) else "-")
+                    
+                    # Rename columns to Turkish visual labels
+                    rename_dict = {
+                        "timestamp": "Zaman Damgası",
+                        "session_id": "Oturum ID",
+                        "symbol": "Sembol",
+                        "side": "Yön",
+                        "leverage": "Kaldıraç",
+                        "action_event": "İşlem Tipi",
+                        "price": "Fiyat",
+                        "spot_move_pct": "Spot Hareketi",
+                        "realized_pnl": "Gerçekleşen PnL",
+                        "smart_be_offset_pct": "Smart BE (%)",
+                        "min_trailing_gap_pct": "Min. TS Mesafe (%)",
+                        "note": "Açıklama"
+                    }
+                    display_df = display_df.rename(columns={k: v for k, v in rename_dict.items() if k in display_df.columns})
+                    
+                    if "Oturum ID" in display_df.columns:
                         # Palette of elegant dark backgrounds for grouping
                         colors = [
                             "background-color: rgba(56, 189, 248, 0.08);",  # Subtle Slate Blue
@@ -712,17 +850,17 @@ def render_historical_view():
                             "background-color: rgba(245, 158, 11, 0.08);",  # Subtle Amber
                             "background-color: rgba(239, 68, 68, 0.08);"    # Subtle Red
                         ]
-                        unique_sessions = df["session_id"].unique()
+                        unique_sessions = display_df["Oturum ID"].unique()
                         session_color_map = {sess: colors[i % len(colors)] for i, sess in enumerate(unique_sessions)}
                         
                         def style_rows(row):
-                            style_str = session_color_map.get(row["session_id"], "")
+                            style_str = session_color_map.get(row["Oturum ID"], "")
                             return [style_str] * len(row)
                             
-                        styled_df = df.style.apply(style_rows, axis=1)
+                        styled_df = display_df.style.apply(style_rows, axis=1)
                         st.dataframe(styled_df, use_container_width=True, hide_index=True)
                     else:
-                        st.dataframe(df, use_container_width=True, hide_index=True)
+                        st.dataframe(display_df, use_container_width=True, hide_index=True)
             except Exception as e:
                 st.error(f"Kayıtlar okunurken hata oluştu: {e}")
         else:

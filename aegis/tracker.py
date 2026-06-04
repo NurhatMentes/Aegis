@@ -6,13 +6,16 @@ from config import get_coin_profile, safe_float
 
 logger = logging.getLogger("Aegis.Tracker")
 
-# Minimum trailing stop mesafesi: fiyatın %0.06'sı
-MIN_TRAILING_GAP_PCT = 0.0006
+# Varsayılan minimum trailing stop mesafesi: fiyatın %0.17'si
+DEFAULT_MIN_TRAILING_GAP_PCT = 0.0017
+# Varsayılan smart breakeven offset: %0.12 (giriş fiyatının altına/üstüne)
+DEFAULT_SMART_BE_OFFSET_PCT = 0.0012
 
 class PositionTracker:
     def __init__(self, inst_id: str, side: str, size: float, entry_price: float, 
                  target_tp_ratio: float, atr: float, ct_val: float, 
-                 exchange_interface, mgn_mode: str = "isolated", pos_side: str = None, action_log_cb=None, trade_ledger_cb=None, lever: float = 1.0, esik1_fraction: float = 0.50):
+                 exchange_interface, mgn_mode: str = "isolated", pos_side: str = None, action_log_cb=None, trade_ledger_cb=None, lever: float = 1.0, esik1_fraction: float = 0.50,
+                 min_trailing_gap_pct: float = None, smart_be_offset_pct: float = None):
         """
         Object-Oriented PositionTracker operating as an isolated state machine per unique instrument ID.
         
@@ -42,6 +45,8 @@ class PositionTracker:
         self.lever = float(lever)
         self.session_id = uuid.uuid4().hex[:8]
         self.esik1_fraction = esik1_fraction
+        self.min_trailing_gap_pct = min_trailing_gap_pct if min_trailing_gap_pct is not None else DEFAULT_MIN_TRAILING_GAP_PCT
+        self.smart_be_offset_pct = smart_be_offset_pct if smart_be_offset_pct is not None else DEFAULT_SMART_BE_OFFSET_PCT
         
         # Load profile
         self.profile = get_coin_profile(inst_id)
@@ -83,14 +88,15 @@ class PositionTracker:
             self.tp1_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction)
             self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction - ESIK2_FIXED_INCREMENT)
 
-        # Smart Breakeven: Eşik 1 TP oranı %0.15'ten yüksekse, SL'yi girişin %0.06 üstüne kur
-        # Böylece komisyon dahil küçük bir kâr garanti altına alınır.
+        # Smart Breakeven: Eşik 1 TP oranı %0.15'ten yüksekse, SL'yi girişin altına/üstüne kur
+        # smart_be_offset_pct kadar giriş fiyatının altına (long) veya üstüne (short) SL konur.
+        # Bu, küçük bir zarar toleransı tanıyarak erken çıkışı önler.
         esik1_tp_pct = self.target_tp_fraction * self.esik1_fraction  # örn: 0.00175
         if esik1_tp_pct > 0.0015:  # > %0.15
             if self.side == "long":
-                self.breakeven_px = self.entry_price * (1.0 + 0.0006)
+                self.breakeven_px = self.entry_price * (1.0 - self.smart_be_offset_pct)
             else:
-                self.breakeven_px = self.entry_price * (1.0 - 0.0006)
+                self.breakeven_px = self.entry_price * (1.0 + self.smart_be_offset_pct)
         else:
             self.breakeven_px = self.entry_price
 
@@ -124,6 +130,8 @@ class PositionTracker:
             "tp1_target": self.tp1_target,
             "tp2_target": self.tp2_target,
             "esik1_fraction": getattr(self, "esik1_fraction", 0.50),
+            "min_trailing_gap_pct": getattr(self, "min_trailing_gap_pct", DEFAULT_MIN_TRAILING_GAP_PCT),
+            "smart_be_offset_pct": getattr(self, "smart_be_offset_pct", DEFAULT_SMART_BE_OFFSET_PCT),
             "breakeven_px": self.breakeven_px,
             "trailing_stop": self.trailing_stop if self.state == "TRAILING" else None,
             "highest_price": self.highest_price if self.side == "long" and self.state == "TRAILING" else None,
@@ -139,7 +147,7 @@ class PositionTracker:
             "session_id": self.session_id
         }
 
-    def update_targets(self, new_tp_ratio: float, new_esik1_fraction: float = 0.50):
+    def update_targets(self, new_tp_ratio: float, new_esik1_fraction: float = 0.50, new_min_trailing_gap_pct: float = None, new_smart_be_offset_pct: float = None):
         """Dynamically updates TP targets if Skynet alters the target_tp_ratio or esik1_fraction on the fly."""
         # Eşik 1 geçildikten sonra (RISK_ZERO veya TRAILING) hedefleri değiştirmeyi reddet
         if self.state != "INIT":
@@ -148,6 +156,10 @@ class PositionTracker:
         if abs(self.target_tp_ratio - new_tp_ratio) > 0.0001 or abs(getattr(self, "esik1_fraction", 0.50) - new_esik1_fraction) > 0.0001:
             self.target_tp_ratio = float(new_tp_ratio)
             self.esik1_fraction = float(new_esik1_fraction)
+            if new_min_trailing_gap_pct is not None:
+                self.min_trailing_gap_pct = new_min_trailing_gap_pct
+            if new_smart_be_offset_pct is not None:
+                self.smart_be_offset_pct = new_smart_be_offset_pct
             self.target_tp_fraction = self.target_tp_ratio / 100.0
                 
             ESIK2_FIXED_INCREMENT = 0.0010  # %0.10 sabit artış
@@ -162,9 +174,9 @@ class PositionTracker:
             esik1_tp_pct = self.target_tp_fraction * self.esik1_fraction
             if esik1_tp_pct > 0.0015:  # > %0.15
                 if self.side == "long":
-                    self.breakeven_px = self.entry_price * (1.0 + 0.0006)
+                    self.breakeven_px = self.entry_price * (1.0 - self.smart_be_offset_pct)
                 else:
-                    self.breakeven_px = self.entry_price * (1.0 - 0.0006)
+                    self.breakeven_px = self.entry_price * (1.0 + self.smart_be_offset_pct)
             else:
                 self.breakeven_px = self.entry_price
                 
@@ -183,6 +195,9 @@ class PositionTracker:
             
         realized_pnl = spot_move_pct * self.lever
         
+        smart_be_pct = (self.smart_be_offset_pct * 100.0) if self.smart_be_offset_pct is not None else 0.0
+        min_trail_pct = (self.min_trailing_gap_pct * 100.0) if self.min_trailing_gap_pct is not None else 0.0
+        
         self.trade_ledger_cb(
             session_id=self.session_id,
             symbol=self.inst_id,
@@ -192,6 +207,8 @@ class PositionTracker:
             price=exit_price,
             spot_move_pct=spot_move_pct,
             realized_pnl=realized_pnl,
+            smart_be_offset_pct=smart_be_pct,
+            min_trailing_gap_pct=min_trail_pct,
             note=note
         )
 
@@ -275,7 +292,7 @@ class PositionTracker:
                 self.ob_multiplier = initial_mult
                 
                 self.state = "TRAILING"
-                min_gap = self.current_price * MIN_TRAILING_GAP_PCT
+                min_gap = self.current_price * self.min_trailing_gap_pct
                 trailing_gap = max(initial_mult * self.atr, min_gap)
                 if self.side == "long":
                     self.highest_price = self.current_price
@@ -330,8 +347,8 @@ class PositionTracker:
                 if self.current_price > self.highest_price:
                     self.highest_price = self.current_price
                 
-                # Dynamic ATR gap with minimum %0.06 floor
-                min_gap = self.current_price * MIN_TRAILING_GAP_PCT
+                # Dynamic ATR gap with minimum trailing gap floor
+                min_gap = self.current_price * self.min_trailing_gap_pct
                 trailing_gap = max(self.ob_multiplier * self.atr, min_gap)
                 candidate_stop = self.highest_price - trailing_gap
                 
@@ -377,8 +394,8 @@ class PositionTracker:
                 if self.current_price < self.lowest_price:
                     self.lowest_price = self.current_price
                 
-                # Dynamic ATR gap with minimum %0.06 floor
-                min_gap = self.current_price * MIN_TRAILING_GAP_PCT
+                # Dynamic ATR gap with minimum trailing gap floor
+                min_gap = self.current_price * self.min_trailing_gap_pct
                 trailing_gap = max(self.ob_multiplier * self.atr, min_gap)
                 candidate_stop = self.lowest_price + trailing_gap
                 
@@ -678,7 +695,11 @@ class PositionTracker:
                     self.state = "RISK_ZERO"
                     if self.action_log_cb:
                         symbol = self.inst_id.replace("-SWAP", "")
-                        be_label = f"girişin %0.06 üstü (${self.breakeven_px:.6f})" if self.breakeven_px != self.entry_price else f"BAŞA BAŞ (${self.breakeven_px:.6f})"
+                        be_offset_pct_str = f"{self.smart_be_offset_pct * 100:.2f}"
+                        if self.side == "long":
+                            be_label = f"girişin %{be_offset_pct_str} altı (${self.breakeven_px:.6f})" if self.breakeven_px != self.entry_price else f"BAŞA BAŞ (${self.breakeven_px:.6f})"
+                        else:
+                            be_label = f"girişin %{be_offset_pct_str} üstü (${self.breakeven_px:.6f})" if self.breakeven_px != self.entry_price else f"BAŞA BAŞ (${self.breakeven_px:.6f})"
                         self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış onaylandı. [{self.side.upper()} - {self.lever}x] Stop-Loss noktası {be_label} seviyesine kilitlendi. Eşik 2 takipçi stop için bekleniyor. Durum: RISK_ZERO (Risk Sıfır!).")
                         
                     self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=price, note="30% Kısmi Kâr Alma")
@@ -832,8 +853,8 @@ class PositionTracker:
             else:
                 logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] No existing OCO/algo order to cancel.")
 
-            # Step 2: Place the new trailing stop (minimum %0.06 floor enforced)
-            min_gap = self.current_price * MIN_TRAILING_GAP_PCT
+            # Step 2: Place the new trailing stop (minimum trailing gap floor enforced)
+            min_gap = self.current_price * self.min_trailing_gap_pct
             gap_distance = max(self.ob_multiplier * self.atr, min_gap)
             await self.set_exchange_trailing_stop(callback_spread=gap_distance, active_px=self.current_price)
             logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] Native trailing stop placed with spread {gap_distance:.6f} at active_px {self.current_price:.6f}. Ready.")
