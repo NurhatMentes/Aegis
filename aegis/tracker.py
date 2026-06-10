@@ -76,17 +76,17 @@ class PositionTracker:
         # Convert target_tp_ratio to decimal fraction (always treat it as a percentage).
         self.target_tp_fraction = self.target_tp_ratio / 100.0
             
-        # Eşik 2 = Eşik 1 fiyatı + sabit %0.10 (entry üzerinden)
-        # Böylece Eşik 1 nerede belirlense Eşik 2 her zaman 0.10% üstünde olur.
-        ESIK2_FIXED_INCREMENT = 0.0010  # %0.10 sabit artış
+        # Eşik 2 = Skynet'in tam TP hedefi (target_tp_fraction'ın tamamı)
+        # Eşik 1 TP'nin esik1_fraction'ı kadar kısmi çıkış yapar;
+        # Eşik 2 ise Skynet'in orijinal tam hedefine eşit trailing başlangıç noktasıdır.
 
         # Calculate Eşik targets
         if self.side == "long":
             self.tp1_target = self.entry_price * (1.0 + self.target_tp_fraction * self.esik1_fraction)
-            self.tp2_target = self.entry_price * (1.0 + self.target_tp_fraction * self.esik1_fraction + ESIK2_FIXED_INCREMENT)
+            self.tp2_target = self.entry_price * (1.0 + self.target_tp_fraction)
         else:
             self.tp1_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction)
-            self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction - ESIK2_FIXED_INCREMENT)
+            self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction)
 
         # Smart Breakeven: Eşik 1 TP oranı %0.15'ten yüksekse, SL'yi girişin altına/üstüne kur
         # smart_be_offset_pct kadar giriş fiyatının altına (long) veya üstüne (short) SL konur.
@@ -101,11 +101,9 @@ class PositionTracker:
             self.breakeven_px = self.entry_price
 
         if self.action_log_cb:
-            e1_pct = self.target_tp_ratio * self.esik1_fraction
-            e2_pct = self.target_tp_ratio * self.esik1_fraction + 0.10  # Eşik1 + 0.10% sabit
             symbol = self.inst_id.replace("-SWAP", "")
             esik1_percent_str = f"{int(self.esik1_fraction * 100)}"
-            self.action_log_cb(f"🛰️ [{symbol}] Yeni pozisyon yakalandı! | Yön: {self.side.upper()} | Kaldıraç: {self.lever}x | Skynet Hedefi: %{self.target_tp_ratio:.2f} | Eşik 1 (%{esik1_percent_str}): ${self.tp1_target:.6f} | Eşik 2 (Eşik1+%0.10): ${self.tp2_target:.6f}")
+            self.action_log_cb(f"🛰️ [{symbol}] Yeni pozisyon yakalandı! | Yön: {self.side.upper()} | Kaldıraç: {self.lever}x | Skynet Hedefi: %{self.target_tp_ratio:.2f} | Eşik 1 (%{esik1_percent_str} hedef): ${self.tp1_target:.6f} | Eşik 2 (Skynet Tam Hedef): ${self.tp2_target:.6f}")
             
         logger.info(f"Initialized PositionTracker for {self.inst_id} ({self.side.upper()}): "
                     f"Size={self.size}, Entry={self.entry_price}, TP1_Target={self.tp1_target:.6f}, "
@@ -162,13 +160,12 @@ class PositionTracker:
                 self.smart_be_offset_pct = new_smart_be_offset_pct
             self.target_tp_fraction = self.target_tp_ratio / 100.0
                 
-            ESIK2_FIXED_INCREMENT = 0.0010  # %0.10 sabit artış
             if self.side == "long":
                 self.tp1_target = self.entry_price * (1.0 + self.target_tp_fraction * self.esik1_fraction)
-                self.tp2_target = self.entry_price * (1.0 + self.target_tp_fraction * self.esik1_fraction + ESIK2_FIXED_INCREMENT)
+                self.tp2_target = self.entry_price * (1.0 + self.target_tp_fraction)
             else:
                 self.tp1_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction)
-                self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction * self.esik1_fraction - ESIK2_FIXED_INCREMENT)
+                self.tp2_target = self.entry_price * (1.0 - self.target_tp_fraction)
 
             # Smart Breakeven güncelle
             esik1_tp_pct = self.target_tp_fraction * self.esik1_fraction
@@ -180,7 +177,7 @@ class PositionTracker:
             else:
                 self.breakeven_px = self.entry_price
                 
-            logger.info(f"[{self.inst_id}] Targets dynamically updated! New TP: {self.target_tp_ratio}, Eşik1: {self.esik1_fraction}, TP1: {self.tp1_target:.6f}, TP2 (Eşik1+%0.10): {self.tp2_target:.6f}, BE: {self.breakeven_px:.6f}")
+            logger.info(f"[{self.inst_id}] Targets dynamically updated! New TP: {self.target_tp_ratio}, Eşik1: {self.esik1_fraction}, TP1: {self.tp1_target:.6f}, TP2 (Skynet Tam Hedef): {self.tp2_target:.6f}, BE: {self.breakeven_px:.6f}")
 
 
     def _log_trade(self, action_event: str, exit_price: float, note: str):
@@ -238,7 +235,7 @@ class PositionTracker:
                 logger.info(f"[{self.inst_id}] EŞİK 1 (TP1) Triggered at price {self.current_price:.6f}")
                 if self.action_log_cb:
                     symbol = self.inst_id.replace("-SWAP", "")
-                    self.action_log_cb(f"🎯 [{symbol}] Eşik 1 (%{int(self.esik1_fraction * 100)} Hedef) yakalandı! [{self.side.upper()} - {self.lever}x] Pozisyonun %30'u için LİMİT kapatma emri fırlatıldı.")
+                    self.action_log_cb(f"🎯 [{symbol}] Eşik 1 (%{int(self.esik1_fraction * 100)} Hedef) yakalandı! [{self.side.upper()} - {self.lever}x] Pozisyonun %50'si için LİMİT kapatma emri fırlatıldı.")
                 
                 # Calculate exit price with a 0.5 * ATR buffer
                 # LONG close = SELL -> place slightly BELOW market to get filled as price rises
@@ -246,7 +243,7 @@ class PositionTracker:
                 exit_price = self.current_price - (0.5 * self.atr)
                 
                 # Spawn asynchronous exit task
-                asyncio.create_task(self.execute_smart_exit(size_pct=0.30, price=exit_price, label="TP1"))
+                asyncio.create_task(self.execute_smart_exit(size_pct=0.50, price=exit_price, label="TP1"))
 
         elif self.state == "RISK_ZERO":
             # BreakEven Stop Loss check
@@ -592,7 +589,7 @@ class PositionTracker:
                         self.state = "CLOSED"
                     else:
                         self.state = "RISK_ZERO"
-                        self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=self.current_price, note="30% Kısmi Kâr Alma (Market Emir)")
+                        self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=self.current_price, note="50% Kısmi Kâr Alma (Market Emir)")
                         if self.action_log_cb:
                             symbol = self.inst_id.replace("-SWAP", "")
                             self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış (market) onaylandı. Başa Baş SL kuruluyor, Eşik 2 izleniyor...")
@@ -702,7 +699,7 @@ class PositionTracker:
                             be_label = f"girişin %{be_offset_pct_str} üstü (${self.breakeven_px:.6f})" if self.breakeven_px != self.entry_price else f"BAŞA BAŞ (${self.breakeven_px:.6f})"
                         self.action_log_cb(f"🛡️ [{symbol}] Kısmi satış onaylandı. [{self.side.upper()} - {self.lever}x] Stop-Loss noktası {be_label} seviyesine kilitlendi. Eşik 2 takipçi stop için bekleniyor. Durum: RISK_ZERO (Risk Sıfır!).")
                         
-                    self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=price, note="30% Kısmi Kâr Alma")
+                    self._log_trade(action_event="TP1_PARTIAL_EXIT", exit_price=price, note="50% Kısmi Kâr Alma")
                     # Sadece başa baş SL — borsaya TP emri VERİLMEZ.
                     # Eşik 2 update_tick() tarafından izlenir; oraya gelince SL iptal + trailing stop kurulur.
                     # OCO/TP emri olsaydı borsa Eşik 2'de pozisyonu kapatır, tracker TRAILING'e geçemezdi.
