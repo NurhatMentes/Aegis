@@ -5,6 +5,7 @@ import textwrap
 from datetime import datetime
 import streamlit as st
 import pandas as pd
+from config import COIN_PROFILES
 
 # Streamlit Page Config
 st.set_page_config(
@@ -349,66 +350,163 @@ if edit_mode:
     # ==================== COIN BAZLI PROFİL YÖNETİMİ ====================
     st.sidebar.markdown("---")
     st.sidebar.markdown("### 🎯 Coin Bazlı Profiller")
-    st.sidebar.caption("Belirli coinler için özel Eşik 1 TP oranı ve Trailing Stop min mesafesi ayarlayın. Tanımlanmamış coinler global ayarları kullanır.")
+    st.sidebar.caption(
+        "config.py'deki profiller temel değerler olarak gösterilir. "
+        "Panelden yapılan kayıtlar, o coin için config değerlerini override eder."
+    )
 
-    # Reload current profiles from disk
+    # Reload current panel overrides from disk
+    panel_overrides = {}
     if os.path.exists(settings_path):
         try:
             with open(settings_path, "r") as f:
                 stg_reload = json.load(f)
-                current_coin_profiles = stg_reload.get("coin_profiles", {})
-        except: pass
+                panel_overrides = stg_reload.get("coin_profiles", {})
+                current_coin_profiles = panel_overrides  # keep compat with save logic below
+        except:
+            pass
 
-    # Display existing profiles
-    if current_coin_profiles:
-        for cp_inst_id, cp_data in list(current_coin_profiles.items()):
-            cp_esik1 = cp_data.get("esik1_ratio_pct", "-")
-            cp_min_trail = cp_data.get("min_trailing_gap_pct", "-")
-            col_info, col_del = st.sidebar.columns([4, 1])
-            with col_info:
-                st.markdown(f"**{cp_inst_id}** — Eşik1: %{cp_esik1} | MinTS: %{cp_min_trail}")
-            with col_del:
-                if st.button("🗑️", key=f"del_cp_{cp_inst_id}", help=f"{cp_inst_id} profilini sil"):
-                    # Delete this coin profile
+    # Merge config.py profiles with panel overrides for display
+    # Keys: all coins in COIN_PROFILES (except DEFAULT) + any extra in panel_overrides
+    all_display_coins = list(COIN_PROFILES.keys())
+    for k in panel_overrides:
+        if k not in all_display_coins:
+            all_display_coins.append(k)
+    # Remove DEFAULT sentinel from display
+    display_coins = [c for c in all_display_coins if c != "DEFAULT"]
+
+    st.sidebar.markdown("**📋 Mevcut Profiller**")
+    for cp_inst_id in display_coins:
+        cfg_base = COIN_PROFILES.get(cp_inst_id, COIN_PROFILES["DEFAULT"])
+        override = panel_overrides.get(cp_inst_id, {})
+
+        # Effective values: panel override wins
+        eff_tp_trigger = override.get("initial_tp_trigger_pct",
+                                      cfg_base.get("initial_tp_trigger_pct", 0.35))
+        eff_trail_atr  = override.get("trailing_gap_atr",
+                                      cfg_base.get("trailing_gap_atr", 1.0))
+        eff_esik1      = override.get("esik1_ratio_pct", None)   # only shows if overridden
+        eff_min_trail  = override.get("min_trailing_gap_pct", None)
+
+        source_tag = "🔧 config" if cp_inst_id not in panel_overrides else "✏️ panel"
+        symbol_short = cp_inst_id.replace("-USDT-SWAP", "")
+
+        col_info, col_del = st.sidebar.columns([4, 1])
+        with col_info:
+            detail_parts = [
+                f"TS Taban: %{eff_tp_trigger:.2f}",
+                f"ATR Çarpan: {eff_trail_atr:.2f}x",
+            ]
+            if eff_esik1 is not None:
+                detail_parts.append(f"Eşik1: %{eff_esik1}")
+            if eff_min_trail is not None:
+                detail_parts.append(f"MinTS: %{eff_min_trail}")
+            st.markdown(
+                f"**{symbol_short}** {source_tag}  \n"
+                f"<span style='font-size:0.78rem;color:#94a3b8;'>{' | '.join(detail_parts)}</span>",
+                unsafe_allow_html=True
+            )
+        with col_del:
+            # Only show delete button if there is a panel override for this coin
+            if cp_inst_id in panel_overrides:
+                if st.button("🗑️", key=f"del_cp_{cp_inst_id}",
+                             help=f"{cp_inst_id} panel override'ını sil (config değerleri geri döner)"):
                     try:
                         with open(settings_path, "r") as f:
                             stg_del = json.load(f)
                         stg_del.get("coin_profiles", {}).pop(cp_inst_id, None)
                         with open(settings_path, "w") as f:
                             json.dump(stg_del, f, indent=2)
-                        st.sidebar.success(f"{cp_inst_id} profili silindi!")
+                        st.sidebar.success(f"{cp_inst_id} panel override silindi!")
                         st.rerun()
                     except Exception as e:
                         st.sidebar.error(f"Silme hatası: {e}")
-    else:
-        st.sidebar.info("Henüz özel coin profili tanımlanmamış.")
+            else:
+                st.markdown("&nbsp;", unsafe_allow_html=True)
 
-    # Add new coin profile form
+    # Add / Edit coin profile form
     with st.sidebar.form("add_coin_profile_form"):
-        st.markdown("**Yeni Profil Ekle**")
-        cp_new_inst = st.text_input("Coin (ör: PEPE-USDT-SWAP)", value="", help="OKX enstrüman ID formatında yazın")
-        cp_new_esik1 = st.slider("Eşik 1 TP Oranı (%)", min_value=10.0, max_value=90.0, value=50.0, step=5.0, key="cp_esik1_slider")
-        cp_new_min_trail = st.slider("Min Trailing Stop Mesafesi (%)", min_value=0.05, max_value=1.00, value=0.17, step=0.01, key="cp_min_trail_slider")
-        if st.form_submit_button("➕ Profil Ekle / Güncelle"):
-            cp_new_inst_clean = cp_new_inst.strip().upper()
-            if cp_new_inst_clean:
+        st.markdown("**➕ Profil Ekle / Düzenle**")
+        st.caption("config.py değerlerini override etmek için coin seçin ve istediğiniz değerleri girin.")
+
+        # Dropdown: all coins from config + custom entry
+        coin_options = display_coins + ["✏️ Manuel Giriş"]
+        cp_select = st.selectbox("Coin Seç", options=coin_options,
+                                  index=0, key="cp_select_box")
+        cp_manual = st.text_input("veya manuel girin (ör: LINK-USDT-SWAP)", value="",
+                                   key="cp_manual_input")
+
+        # Determine base values for selected coin
+        resolved = cp_select if cp_select != "✏️ Manuel Giriş" else ""
+        base_cfg = COIN_PROFILES.get(resolved, COIN_PROFILES["DEFAULT"])
+        base_ov  = panel_overrides.get(resolved, {})
+        default_tp_trigger = float(base_ov.get("initial_tp_trigger_pct",
+                                                base_cfg.get("initial_tp_trigger_pct", 0.35)))
+        default_trail_atr  = float(base_ov.get("trailing_gap_atr",
+                                                base_cfg.get("trailing_gap_atr", 1.0)))
+        default_esik1      = float(base_ov.get("esik1_ratio_pct", 50.0))
+        default_min_trail  = float(base_ov.get("min_trailing_gap_pct", 0.17))
+
+        cp_new_tp_trigger = st.slider(
+            "TS Taban (initial_tp_trigger_pct %)",
+            min_value=0.10, max_value=1.00,
+            value=min(max(default_tp_trigger, 0.10), 1.00),
+            step=0.01,
+            key="cp_tp_trigger_slider",
+            help="ATR×çarpan bu değerin altına düşerse bu taban minimum olarak kullanılır"
+        )
+        cp_new_trail_atr = st.slider(
+            "ATR Çarpanı (trailing_gap_atr)",
+            min_value=0.50, max_value=2.50,
+            value=min(max(default_trail_atr, 0.50), 2.50),
+            step=0.01,
+            key="cp_trail_atr_slider",
+            help="Trailing gap = ATR × bu çarpan (min. TS taban koruması altında kalmaz)"
+        )
+        cp_new_esik1 = st.slider(
+            "Eşik 1 Kar Al Oranı (%)",
+            min_value=10.0, max_value=90.0,
+            value=min(max(default_esik1, 10.0), 90.0),
+            step=5.0,
+            key="cp_esik1_slider",
+            help="Bu coin için Skynet hedefinin yüzde kaçında Eşik 1 tetiklensin"
+        )
+        cp_new_min_trail = st.slider(
+            "Min Trailing Stop Mesafesi (%)",
+            min_value=0.05, max_value=1.00,
+            value=min(max(default_min_trail, 0.05), 1.00),
+            step=0.01,
+            key="cp_min_trail_slider",
+            help="Takipçi stop'un fiyattan minimum uzaklığı (ATR taban korumasına ek güvence)"
+        )
+
+        if st.form_submit_button("💾 Kaydet / Güncelle"):
+            # Resolve target coin
+            if cp_select == "✏️ Manuel Giriş":
+                cp_target = cp_manual.strip().upper()
+            else:
+                cp_target = cp_select.strip().upper()
+
+            if cp_target:
                 try:
                     with open(settings_path, "r") as f:
                         stg_add = json.load(f)
                     if "coin_profiles" not in stg_add:
                         stg_add["coin_profiles"] = {}
-                    stg_add["coin_profiles"][cp_new_inst_clean] = {
-                        "esik1_ratio_pct": cp_new_esik1,
-                        "min_trailing_gap_pct": cp_new_min_trail
+                    stg_add["coin_profiles"][cp_target] = {
+                        "initial_tp_trigger_pct": cp_new_tp_trigger,
+                        "trailing_gap_atr":       cp_new_trail_atr,
+                        "esik1_ratio_pct":         cp_new_esik1,
+                        "min_trailing_gap_pct":    cp_new_min_trail,
                     }
                     with open(settings_path, "w") as f:
                         json.dump(stg_add, f, indent=2)
-                    st.sidebar.success(f"{cp_new_inst_clean} profili kaydedildi!")
+                    st.sidebar.success(f"{cp_target} profili kaydedildi!")
                     st.rerun()
                 except Exception as e:
                     st.sidebar.error(f"Kayıt hatası: {e}")
             else:
-                st.sidebar.warning("Lütfen geçerli bir coin adı girin.")
+                st.sidebar.warning("Lütfen geçerli bir coin seçin veya girin.")
 
 @fragment_decorator(run_every=1.0)
 def render_live_view(is_muted_val):

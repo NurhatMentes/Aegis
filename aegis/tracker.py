@@ -290,7 +290,11 @@ class PositionTracker:
                 
                 self.state = "TRAILING"
                 min_gap = self.current_price * self.min_trailing_gap_pct
-                trailing_gap = max(initial_mult * self.atr, min_gap)
+                # config.py'den coin profil taban koruması:
+                # ATR×çarpan, initial_tp_trigger_pct (yüzde) değerinin altına düşemez
+                profile_tp_pct = self.profile.get("initial_tp_trigger_pct", 0.0) / 100.0
+                profile_min_gap = self.current_price * profile_tp_pct
+                trailing_gap = max(initial_mult * self.atr, min_gap, profile_min_gap)
                 if self.side == "long":
                     self.highest_price = self.current_price
                     self.trailing_stop = self.highest_price - trailing_gap
@@ -346,7 +350,11 @@ class PositionTracker:
                 
                 # Dynamic ATR gap with minimum trailing gap floor
                 min_gap = self.current_price * self.min_trailing_gap_pct
-                trailing_gap = max(self.ob_multiplier * self.atr, min_gap)
+                # config.py'den coin profil taban koruması:
+                # ATR×çarpan, initial_tp_trigger_pct (yüzde) değerinin altına düşemez
+                profile_tp_pct = self.profile.get("initial_tp_trigger_pct", 0.0) / 100.0
+                profile_min_gap = self.current_price * profile_tp_pct
+                trailing_gap = max(self.ob_multiplier * self.atr, min_gap, profile_min_gap)
                 candidate_stop = self.highest_price - trailing_gap
                 
                 # Jump Protection: Stop only moves tighter (higher)
@@ -393,7 +401,11 @@ class PositionTracker:
                 
                 # Dynamic ATR gap with minimum trailing gap floor
                 min_gap = self.current_price * self.min_trailing_gap_pct
-                trailing_gap = max(self.ob_multiplier * self.atr, min_gap)
+                # config.py'den coin profil taban koruması:
+                # ATR×çarpan, initial_tp_trigger_pct (yüzde) değerinin altına düşemez
+                profile_tp_pct = self.profile.get("initial_tp_trigger_pct", 0.0) / 100.0
+                profile_min_gap = self.current_price * profile_tp_pct
+                trailing_gap = max(self.ob_multiplier * self.atr, min_gap, profile_min_gap)
                 candidate_stop = self.lowest_price + trailing_gap
                 
                 # Jump Protection: Stop only moves tighter (lower)

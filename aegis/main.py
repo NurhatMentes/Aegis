@@ -623,6 +623,23 @@ class AegisOrchestrator:
                 logger.error(f"Failed to restore tracker state for {inst_id} from JSON: {e}")
 
         self.active_trackers[inst_id] = tracker
+
+        # Panel override: initial_tp_trigger_pct ve trailing_gap_atr'yi
+        # tracker.profile'a yaz (tracker.py'nin profile_min_gap hesabı bunu kullanır)
+        try:
+            _stg_path = "aegis/aegis_settings.json"
+            if os.path.exists(_stg_path):
+                with open(_stg_path, "r") as _f:
+                    _stg = json.load(_f)
+                _cp_all = _stg.get("coin_profiles", {})
+                if inst_id in _cp_all:
+                    _cp = _cp_all[inst_id]
+                    if "initial_tp_trigger_pct" in _cp:
+                        tracker.profile["initial_tp_trigger_pct"] = float(_cp["initial_tp_trigger_pct"])
+                    if "trailing_gap_atr" in _cp:
+                        tracker.profile["trailing_gap_atr"] = float(_cp["trailing_gap_atr"])
+        except Exception as _e:
+            logger.warning(f"[{inst_id}] Could not apply panel profile overrides: {_e}")
         
         # Request dynamic public WS subscription for the new instrument
         await self.ws_sub_queue.put(("subscribe", inst_id))
