@@ -61,6 +61,7 @@ class PositionTracker:
         self.algo_tp_id = None
         self.last_placed_tp_px = None
         self.squeeze_defense_active = False
+        self.last_exit_event = None  # Son çıkış olayı (PostCloseWatcher için)
         
         # Trailing variables
         self.highest_price = 0.0
@@ -181,6 +182,7 @@ class PositionTracker:
 
 
     def _log_trade(self, action_event: str, exit_price: float, note: str):
+        self.last_exit_event = action_event  # PostCloseWatcher için kaydet
         if not self.trade_ledger_cb:
             return
         
@@ -864,7 +866,9 @@ class PositionTracker:
 
             # Step 2: Place the new trailing stop (minimum trailing gap floor enforced)
             min_gap = self.current_price * self.min_trailing_gap_pct
-            gap_distance = max(self.ob_multiplier * self.atr, min_gap)
+            profile_tp_pct = self.profile.get("initial_tp_trigger_pct", 0.0) / 100.0
+            profile_min_gap = self.current_price * profile_tp_pct
+            gap_distance = max(self.ob_multiplier * self.atr, min_gap, profile_min_gap)
             await self.set_exchange_trailing_stop(callback_spread=gap_distance, active_px=self.current_price)
             logger.info(f"[{self.inst_id}] [TRAILING TRANSITION] Native trailing stop placed with spread {gap_distance:.6f} at active_px {self.current_price:.6f}. Ready.")
         except Exception as e:

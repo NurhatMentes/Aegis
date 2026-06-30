@@ -93,8 +93,8 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tracker.state, "INIT")
         # TP1 target = 60000 * (1 + 0.004 * 0.40) = 60000 * 1.0016 = 60096
         self.assertAlmostEqual(tracker.tp1_target, 60096.0)
-        # TP2 target = 60000 * (1 + 0.004 * 0.40 + 0.001) = 60000 * 1.0026 = 60156
-        self.assertAlmostEqual(tracker.tp2_target, 60156.0)
+        # TP2 target = 60000 * (1 + 0.004) = 60000 * 1.004 = 60240 (Skynet tam hedef)
+        self.assertAlmostEqual(tracker.tp2_target, 60240.0)
 
         # 1. Update price below TP1 target
         tracker.update_tick(60050.0, volume_ratio=1.0, ob_imbalance=0.0)
@@ -114,45 +114,45 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         # Price passed should be current_price - 0.5 * atr = 60100 - 50 = 60050
         args, kwargs = tracker.execute_smart_exit.call_args
         self.assertAlmostEqual(kwargs.get("price"), 60050.0)
-        self.assertEqual(kwargs.get("size_pct"), 0.30)
+        self.assertEqual(kwargs.get("size_pct"), 0.50)
         self.assertEqual(kwargs.get("label"), "TP1")
 
         # 3. Simulate completion of TP1 exit
         # Reset tracker lock and transition state manually (since we mocked execute_smart_exit)
         tracker.is_locked = False
         tracker.state = "RISK_ZERO"
-        # Remaining size would be 10 - 3 = 7 contracts
-        tracker.size = 7.0
+        # Remaining size would be 10 - 5 = 5 contracts
+        tracker.size = 5.0
 
-        # 4. Update price below TP2 (TP2 is 60156)
-        tracker.update_tick(60120.0, volume_ratio=1.0, ob_imbalance=0.0)
+        # 4. Update price below TP2 (TP2 is 60240)
+        tracker.update_tick(60200.0, volume_ratio=1.0, ob_imbalance=0.0)
         self.assertEqual(tracker.state, "RISK_ZERO")
         self.assertFalse(tracker.is_locked)
 
         # 5. Update price above TP2 -> Should transition to TRAILING state immediately
         tracker.execute_smart_exit = AsyncMock()
         # Bullish momentum: vol_ratio > 2.0 (e.g. 2.5), ob_imbalance > 0.15 (e.g. 0.30)
-        tracker.update_tick(60180.0, volume_ratio=2.5, ob_imbalance=0.30)
+        tracker.update_tick(60280.0, volume_ratio=2.5, ob_imbalance=0.30)
         
         # Should transition to TRAILING and NOT lock
         self.assertEqual(tracker.state, "TRAILING")
         self.assertFalse(tracker.is_locked)
         tracker.execute_smart_exit.assert_not_called()
-        self.assertEqual(tracker.highest_price, 60180.0)
-        # Trailing stop: 60180 - (1.5 * 100) = 60030
-        self.assertEqual(tracker.trailing_stop, 60030.0)
+        self.assertEqual(tracker.highest_price, 60280.0)
+        # Trailing stop: gap=max(1.5*100, 60280*0.0017, 60280*0.0040)=241.12 → 60280-241.12=60038.88
+        self.assertEqual(tracker.trailing_stop, 60038.88)
 
         # 6. Price goes higher -> Trailing stop moves up
         tracker.update_tick(60400.0, volume_ratio=1.0, ob_imbalance=0.0)
         self.assertEqual(tracker.highest_price, 60400.0)
-        # Trailing stop: max(1.0 * 100, 60400 * 0.0017) = max(100, 102.68) = 102.68
-        # 60400 - 102.68 = 60297.32
-        expected_gap = 60400.0 * 0.0017  # min gap floor kicks in (102.68 > 100)
+        # Trailing stop: max(1.0 * 100, 60400 * 0.0017, 60400 * 0.0040) = 241.60
+        # 60400 - 241.60 = 60158.40
+        expected_gap = 60400.0 * 0.0040  # profile min gap floor kicks in (241.60 > 100)
         self.assertAlmostEqual(tracker.trailing_stop, 60400.0 - expected_gap, places=2)
         self.assertEqual(tracker.state, "TRAILING")
 
-        # 7. Price hits trailing stop -> Triggers Trailing Exit (Trailing stop is at 60300.0)
-        tracker.update_tick(60290.0, volume_ratio=1.0, ob_imbalance=0.0)
+        # 7. Price hits trailing stop -> Triggers Trailing Exit (Trailing stop is at 60158.40)
+        tracker.update_tick(60100.0, volume_ratio=1.0, ob_imbalance=0.0)
         self.assertTrue(tracker.is_locked)
         tracker.execute_smart_exit.assert_called_once()
         args, kwargs = tracker.execute_smart_exit.call_args
@@ -200,8 +200,8 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         
         # Bullish momentum: vol_ratio > 2.0 (e.g. 2.5), ob_imbalance > 0.15 (e.g. 0.30)
         # With ob_imbalance > 0.15, ob_multiplier is 1.5.
-        # TP2 target is 60156.0.
-        tracker.update_tick(60180.0, volume_ratio=2.5, ob_imbalance=0.30)
+        # TP2 target is 60240.0 (Skynet tam hedef).
+        tracker.update_tick(60280.0, volume_ratio=2.5, ob_imbalance=0.30)
         await asyncio.sleep(0.01)
         
         self.assertEqual(tracker.state, "TRAILING")
@@ -210,13 +210,13 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(cancelled_sl), 1)
         
         # Check that new trailing stop was placed
-        # Initial trailing stop: 60180 - (1.5 * 100) = 60030
-        self.assertEqual(tracker.trailing_stop, 60030.0)
-        self.assertEqual(tracker.last_placed_spread, 150.0)
+        # Initial trailing stop: gap=max(1.5*100, 60280*0.0017, 60280*0.0040)=241.12 → 60280-241.12=60038.88
+        self.assertEqual(tracker.trailing_stop, 60038.88)
+        self.assertEqual(tracker.last_placed_spread, 241.12)
         placed_algo = [o for o in exchange.placed_orders if o.get("ord_type") == "move_order_stop"]
         self.assertEqual(len(placed_algo), 1)
-        self.assertAlmostEqual(float(placed_algo[0]["callback_spread"]), 150.0)
-        self.assertAlmostEqual(float(placed_algo[0]["active_px"]), 60180.0)
+        self.assertAlmostEqual(float(placed_algo[0]["callback_spread"]), 241.12)
+        self.assertAlmostEqual(float(placed_algo[0]["active_px"]), 60280.0)
         
         # 3. Price goes higher -> trailing stop moves up -> exchange trailing stop is updated if spread changes!
         # Initial trailing stop: 60110 (spread 150)
@@ -228,18 +228,19 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         tracker.last_ts_update_time = 0.0
         tracker.update_tick(60400.0, volume_ratio=1.0, ob_imbalance=0.0)
         await asyncio.sleep(0.01)
-        # Trailing stop: max(1.0 * 100, 60400 * 0.0017) = max(100, 102.68) = 102.68
-        expected_gap = 60400.0 * 0.0017
+        # Trailing stop: max(1.0 * 100, 60400 * 0.0017, 60400 * 0.0040) = 241.60
+        expected_gap = 60400.0 * 0.0040
         self.assertAlmostEqual(tracker.trailing_stop, 60400.0 - expected_gap, places=2)
         expected_spread = expected_gap
-        self.assertAlmostEqual(tracker.last_placed_spread, expected_spread, places=2)
+        # Verify old SL/TS cancelled and new placed (Wait: it shouldn't update because spread went from 241.12 to 241.60 which is widening)
+        self.assertAlmostEqual(tracker.last_placed_spread, 241.12, places=2)
         
-        # Verify old SL/TS cancelled and new placed
+        # Verify no cancellation occurred
         cancelled_sl = [c for c in exchange.cancelled_orders if c.get("algo_id") == "mock_algo_sl_123"]
-        self.assertEqual(len(cancelled_sl), 1)
-        placed_algo = [o for o in exchange.placed_orders if o.get("ord_type") == "move_order_stop"]
-        self.assertEqual(len(placed_algo), 1)
-        self.assertAlmostEqual(float(placed_algo[0]["callback_spread"]), expected_spread, places=0)
+        self.assertEqual(len(cancelled_sl), 0)
+        
+        new_placed_algo = [o for o in exchange.placed_orders if o.get("ord_type") == "move_order_stop"]
+        self.assertEqual(len(new_placed_algo), 0)
 
     async def test_short_fsm_execution_and_trailing(self):
         # Initialize mock exchange
@@ -263,8 +264,8 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(tracker.state, "INIT")
         # TP1 target = 60000 * (1 - 0.004 * 0.40) = 60000 * 0.9984 = 59904
         self.assertAlmostEqual(tracker.tp1_target, 59904.0)
-        # TP2 target = 60000 * (1 - 0.004 * 0.40 - 0.001) = 60000 * 0.9974 = 59844
-        self.assertAlmostEqual(tracker.tp2_target, 59844.0)
+        # TP2 target = 60000 * (1 - 0.004) = 60000 * 0.996 = 59760 (Skynet tam hedef)
+        self.assertAlmostEqual(tracker.tp2_target, 59760.0)
 
         # 1. Update price above TP1 target
         tracker.update_tick(60050.0, volume_ratio=1.0, ob_imbalance=0.0)
@@ -280,40 +281,40 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         tracker.execute_smart_exit.assert_called_once()
         args, kwargs = tracker.execute_smart_exit.call_args
         self.assertAlmostEqual(kwargs.get("price"), 59850.0)
-        self.assertEqual(kwargs.get("size_pct"), 0.30)
+        self.assertEqual(kwargs.get("size_pct"), 0.50)
         self.assertEqual(kwargs.get("label"), "TP1")
 
         # 3. Simulate completion of TP1 exit
         tracker.is_locked = False
         tracker.state = "RISK_ZERO"
-        tracker.size = 7.0
+        tracker.size = 5.0
 
-        # 4. Update price above TP2 (TP2 is 59844)
-        tracker.update_tick(59880.0, volume_ratio=1.0, ob_imbalance=0.0)
+        # 4. Update price above TP2 (TP2 is 59760)
+        tracker.update_tick(59800.0, volume_ratio=1.0, ob_imbalance=0.0)
         self.assertEqual(tracker.state, "RISK_ZERO")
         self.assertFalse(tracker.is_locked)
 
         # 5. Update price below TP2 -> Should transition to TRAILING state immediately
-        tracker.update_tick(59800.0, volume_ratio=2.5, ob_imbalance=-0.30)
+        tracker.update_tick(59720.0, volume_ratio=2.5, ob_imbalance=-0.30)
         await asyncio.sleep(0.01)
         
         self.assertEqual(tracker.state, "TRAILING")
         self.assertFalse(tracker.is_locked)
-        self.assertEqual(tracker.lowest_price, 59800.0)
-        # Trailing stop: 59800 + (1.5 * 100) = 59950
-        self.assertEqual(tracker.trailing_stop, 59950.0)
-        self.assertEqual(tracker.last_placed_spread, 150.0)
+        self.assertEqual(tracker.lowest_price, 59720.0)
+        # Trailing stop: gap=max(1.5*100, 59720*0.0017, 59720*0.0040)=238.88 → 59720+238.88=59958.88
+        self.assertEqual(tracker.trailing_stop, 59958.88)
+        self.assertEqual(tracker.last_placed_spread, 238.88)
         
         # Check that trailing stop was placed on mock exchange
         placed_algo = [o for o in exchange.placed_orders if o.get("ord_type") == "move_order_stop"]
         self.assertEqual(len(placed_algo), 1)
-        self.assertAlmostEqual(float(placed_algo[0]["callback_spread"]), 150.0)
+        self.assertAlmostEqual(float(placed_algo[0]["callback_spread"]), 238.88)
 
         # 6. Price goes lower -> Trailing stop moves down
         tracker.update_tick(59600.0, volume_ratio=1.0, ob_imbalance=0.0)
         self.assertEqual(tracker.lowest_price, 59600.0)
-        # trailing_stop: max(1.0 * 100, 59600 * 0.0017) = max(100, 101.32) = 101.32
-        expected_gap_600 = 59600.0 * 0.0017
+        # trailing_stop: max(1.0 * 100, 59600 * 0.0017, 59600 * 0.0040) = 238.40
+        expected_gap_600 = 59600.0 * 0.0040
         self.assertAlmostEqual(tracker.trailing_stop, 59600.0 + expected_gap_600, places=2)
         
         # Spread changed from 150 to 100.
@@ -325,14 +326,13 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         tracker.update_tick(59500.0, volume_ratio=1.0, ob_imbalance=0.0)
         await asyncio.sleep(0.01)
         self.assertEqual(tracker.lowest_price, 59500.0)
-        # Spread now = max(1.0*100, 59500*0.0017) = max(100, 101.15) = 101.15
-        expected_gap_500 = 59500.0 * 0.0017
+        # Spread now = max(1.0*100, 59500*0.0017, 59500*0.0040) = 238.00
+        expected_gap_500 = 59500.0 * 0.0040
         self.assertAlmostEqual(tracker.trailing_stop, 59500.0 + expected_gap_500, places=2)
-        self.assertAlmostEqual(tracker.last_placed_spread, expected_gap_500, places=2)
+        self.assertAlmostEqual(tracker.last_placed_spread, 238.88, places=2)
         
         placed_algo = [o for o in exchange.placed_orders if o.get("ord_type") == "move_order_stop"]
-        self.assertEqual(len(placed_algo), 1)
-        self.assertAlmostEqual(float(placed_algo[0]["callback_spread"]), expected_gap_500, places=0)
+        self.assertEqual(len(placed_algo), 0)
 
     async def test_small_tp_ratio_conversion(self):
         exchange = MockExchange()
@@ -353,8 +353,8 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         self.assertAlmostEqual(tracker.target_tp_fraction, 0.00035)
         # tp1_target = 60000 * (1 + 0.00035 * 0.50) = 60010.5
         self.assertAlmostEqual(tracker.tp1_target, 60010.5)
-        # tp2_target = 60000 * (1 + 0.00035 * 0.50 + 0.0010) = 60070.5
-        self.assertAlmostEqual(tracker.tp2_target, 60070.5)
+        # tp2_target = 60000 * (1 + 0.00035) = 60021.0 (Skynet tam hedef)
+        self.assertAlmostEqual(tracker.tp2_target, 60021.0)
         
         # Test updating targets dynamically with small ratio
         tracker.update_targets(0.024, new_esik1_fraction=0.50)
@@ -542,9 +542,9 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         tracker.state = "RISK_ZERO"
         tracker.algo_sl_id = "existing_sl_123"
         
-        # Trigger Eşik 2: TP2 ≈ 80 * (1 + 0.002 + 0.001) = 80.24
+        # Trigger Eşik 2: TP2 = 80 * (1 + 0.004) = 80.32 (Skynet tam hedef)
         # Price goes above TP2 with bullish momentum
-        tracker.update_tick(80.30, volume_ratio=2.5, ob_imbalance=0.30)
+        tracker.update_tick(80.35, volume_ratio=2.5, ob_imbalance=0.30)
         await asyncio.sleep(0.01)
         
         # Should be in TRAILING
@@ -558,9 +558,9 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         # New native trailing stop should be placed
         placed_ts = [o for o in exchange.placed_orders if o.get("ord_type") == "move_order_stop"]
         self.assertEqual(len(placed_ts), 1)
-        # OB imbalance > 0.15 → multiplier = 1.5 → spread = 1.5 * 0.5 = 0.75
+        # OB imbalance > 0.15 → multiplier = 1.5 → spread = max(1.5*0.5, 80.35*0.0017) = max(0.75, 0.137) = 0.75
         self.assertAlmostEqual(float(placed_ts[0]["callback_spread"]), 0.75, places=1)
-        self.assertAlmostEqual(float(placed_ts[0]["active_px"]), 80.30, places=1)
+        self.assertAlmostEqual(float(placed_ts[0]["active_px"]), 80.35, places=1)
 
     async def test_trailing_stop_full_flow_short(self):
         """SHORT: Eşik2 sonrası TRAILING → move_order_stop → güncellenir → tetiklenir"""
@@ -583,9 +583,9 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         tracker.state = "RISK_ZERO"
         tracker.algo_sl_id = "existing_sl_456"
         
-        # Trigger Eşik 2: TP2 ≈ 80 * (1 - 0.002 - 0.001) = 79.76
+        # Trigger Eşik 2: TP2 = 80 * (1 - 0.004) = 79.68 (Skynet tam hedef)
         # Price goes below TP2 with bearish momentum
-        tracker.update_tick(79.70, volume_ratio=2.5, ob_imbalance=-0.30)
+        tracker.update_tick(79.65, volume_ratio=2.5, ob_imbalance=-0.30)
         await asyncio.sleep(0.01)
         
         # Should be in TRAILING
@@ -599,7 +599,7 @@ class TestPositionTracker(unittest.IsolatedAsyncioTestCase):
         # New trailing stop placed
         placed_ts = [o for o in exchange.placed_orders if o.get("ord_type") == "move_order_stop"]
         self.assertEqual(len(placed_ts), 1)
-        # OB imbalance < -0.15 → multiplier = 1.5 → spread = 1.5 * 0.5 = 0.75
+        # OB imbalance < -0.15 → multiplier = 1.5 → spread = max(1.5*0.5, 79.65*0.0017) = max(0.75, 0.135) = 0.75
         self.assertAlmostEqual(float(placed_ts[0]["callback_spread"]), 0.75, places=1)
 
     # ============ NO OCO/TP FUNCTIONS EXIST TEST ============

@@ -13,6 +13,7 @@ import websockets
 import config
 from config import safe_float
 from tracker import PositionTracker
+from post_close_watcher import PostCloseWatcher
 
 # Setup Logging
 logger = logging.getLogger("Aegis")
@@ -665,17 +666,28 @@ class AegisOrchestrator:
             asyncio.create_task(self.exchange.cancel_algo_order(inst_id, tracker.algo_tp_id))
             tracker.algo_tp_id = None
 
+        # Determine exit reason for PostCloseWatcher
+        if tracker.state == "CLOSED" and getattr(tracker, "last_exit_event", None):
+            exit_reason = tracker.last_exit_event
+        elif tracker.state != "CLOSED":
+            # Not yet CLOSED — will be set below
+            pass
+        else:
+            exit_reason = "EXTERNAL_CLOSE"
         
         # If tracker is not CLOSED (closed externally or offline), log to CSV ledger
         if tracker.state != "CLOSED":
             exit_price = tracker.current_price if tracker.current_price > 0 else tracker.entry_price
             if tracker.state == "TRAILING":
+                exit_reason = "TRAILING_EXIT"
                 tracker.state = "CLOSED"
                 tracker._log_trade(action_event="TRAILING_EXIT", exit_price=exit_price, note="Takipçi Stop Tetiklendi — Pozisyon Kapatıldı")
             elif tracker.state == "RISK_ZERO":
+                exit_reason = "BE_EXIT"
                 tracker.state = "CLOSED"
                 tracker._log_trade(action_event="BE_EXIT", exit_price=exit_price, note="Başa Baş Koruması Tetiklendi — Pozisyon Kapatıldı")
             else:
+                exit_reason = "EXTERNAL_CLOSE"
                 tracker.state = "CLOSED"
                 reason_tr = reason
                 if "No active position found via REST" in reason:
@@ -684,21 +696,33 @@ class AegisOrchestrator:
                     reason_tr = "WebSocket pozisyon büyüklüğü 0'a düştü"
                 tracker._log_trade(action_event="EXTERNAL_CLOSE", exit_price=exit_price, note=f"Dışarıdan kapatıldı: {reason_tr}")
         
-        # Request dynamic unsubscribe
-        await self.ws_sub_queue.put(("unsubscribe", inst_id))
-        
-        # We assume if PnL info is needed, tracker has current_price and entry_price
+        # Calculate PnL for display and PostCloseWatcher
+        watcher_exit_price = tracker.current_price if tracker.current_price > 0 else tracker.entry_price
+        pnl_pct = 0.0
         pnl_str = ""
         if tracker.entry_price > 0:
             if tracker.side == "long":
-                pnl_pct = ((tracker.current_price - tracker.entry_price) / tracker.entry_price) * 100.0
+                spot_pnl = ((tracker.current_price - tracker.entry_price) / tracker.entry_price) * 100.0
             else:
-                pnl_pct = ((tracker.entry_price - tracker.current_price) / tracker.entry_price) * 100.0
-            pnl_sign = "+" if pnl_pct >= 0 else ""
-            pnl_str = f" | PnL: {pnl_sign}{pnl_pct:.2f}%"
+                spot_pnl = ((tracker.entry_price - tracker.current_price) / tracker.entry_price) * 100.0
+            pnl_pct = spot_pnl * tracker.lever  # Kaldıraçlı PnL (watcher için)
+            pnl_sign = "+" if spot_pnl >= 0 else ""
+            pnl_str = f" | PnL: {pnl_sign}{spot_pnl:.2f}%"
             
         self.add_action_log(f"🔴 POZİSYON KAPATILDI: {inst_id}{pnl_str}")
         logger.info(f"[{inst_id}] Tracking engine closed & removed. Reason: {reason}")
+        
+        # Launch PostCloseWatcher — WS unsubscribe is deferred to watcher completion
+        watcher = PostCloseWatcher(
+            orchestrator=self,
+            inst_id=inst_id,
+            original_side=tracker.side,
+            entry_price=tracker.entry_price,
+            exit_price=watcher_exit_price,
+            exit_reason=exit_reason,
+            realized_pnl_pct=pnl_pct
+        )
+        asyncio.create_task(watcher.run())
 
     async def rest_sync_loop(self):
         """REST Synchronization loop executing every 10s to sync states with account truth."""

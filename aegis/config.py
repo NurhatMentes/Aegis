@@ -13,6 +13,9 @@ OKX_IS_SIMULATED = os.getenv("OKX_IS_SIMULATED", "True").lower() in ("true", "1"
 # State File Path
 STATE_FILE_PATH = os.getenv("STATE_FILE_PATH", "aegis_state.json")
 
+# n8n Post-Close Reentry Webhook URL
+N8N_REENTRY_WEBHOOK_URL = os.getenv("N8N_REENTRY_WEBHOOK_URL", "")
+
 # OKX API Endpoints
 if OKX_IS_SIMULATED:
     OKX_REST_URL = "https://www.okx.com"
